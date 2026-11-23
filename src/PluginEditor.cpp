@@ -2,6 +2,33 @@
 
 #include <cmath>
 
+#if JUCE_WINDOWS
+ #ifndef WIN32_LEAN_AND_MEAN
+  #define WIN32_LEAN_AND_MEAN
+ #endif
+ #ifndef NOMINMAX
+  #define NOMINMAX
+ #endif
+ #include <windows.h>
+#endif
+
+namespace
+{
+bool isNativeWindowVisible(juce::Component* comp)
+{
+    if (comp == nullptr || !comp->isShowing())
+        return false;
+#if JUCE_WINDOWS
+    if (auto* peer = comp->getPeer())
+    {
+        if (auto* hwnd = static_cast<HWND>(peer->getNativeHandle()))
+            return ::IsWindowVisible(hwnd) != FALSE;
+    }
+#endif
+    return true;
+}
+} // namespace
+
 //==============================================================================
 // StudioLookAndFeel
 //==============================================================================
@@ -109,12 +136,12 @@ void StudioLookAndFeel::drawScrollbar(juce::Graphics& g, juce::ScrollBar&, int x
 // CandidatesListModel
 //==============================================================================
 
-int LyricsDisplayAudioProcessorEditor::CandidatesListModel::getNumRows()
+int LyricsDisplayContent::CandidatesListModel::getNumRows()
 {
     return std::min(12, static_cast<int>(owner.candidates.size()));
 }
 
-void LyricsDisplayAudioProcessorEditor::CandidatesListModel::paintListBoxItem(
+void LyricsDisplayContent::CandidatesListModel::paintListBoxItem(
     int rowNumber, juce::Graphics& g, int width, int height, bool rowIsSelected)
 {
     if (rowNumber < 0 || rowNumber >= static_cast<int>(owner.candidates.size()))
@@ -157,7 +184,7 @@ void LyricsDisplayAudioProcessorEditor::CandidatesListModel::paintListBoxItem(
                juce::Justification::centredLeft, true);
 }
 
-void LyricsDisplayAudioProcessorEditor::CandidatesListModel::listBoxItemClicked(int row, const juce::MouseEvent&)
+void LyricsDisplayContent::CandidatesListModel::listBoxItemClicked(int row, const juce::MouseEvent&)
 {
     if (row < 0 || row >= static_cast<int>(owner.candidates.size()))
         return;
@@ -172,21 +199,32 @@ void LyricsDisplayAudioProcessorEditor::CandidatesListModel::listBoxItemClicked(
 }
 
 //==============================================================================
-// LyricsDisplayAudioProcessorEditor
+// LyricsDisplayContent
 //==============================================================================
 
-LyricsDisplayAudioProcessorEditor::LyricsDisplayAudioProcessorEditor(LyricsDisplayAudioProcessor& p)
-    : AudioProcessorEditor(&p), processor(p)
+LyricsDisplayContent::LyricsDisplayContent(LyricsDisplayAudioProcessor& p, bool isFloatingWindow)
+    : processor(p), isFloating(isFloatingWindow)
 {
     setLookAndFeel(&lookAndFeel);
-    setResizable(true, true);
-    setResizeLimits(520, 380, 1920, 1200);
-    setSize(740, 600);
 
     // Header
-    brandLabel.setText("LYRICS DISPLAY", juce::dontSendNotification);
-    brandLabel.setFont(theme::makeUiFont(14.5f, true));
+    brandLabel.setText(isFloating ? "LYRICS DISPLAY (PINNED)" : "LYRICS DISPLAY", juce::dontSendNotification);
+    brandLabel.setFont(theme::makeUiFont(14.0f, true));
     addAndMakeVisible(brandLabel);
+
+    stayOpenBtn.setClickingTogglesState(true);
+    stayOpenBtn.setToggleState(processor.isStayOpen(), juce::dontSendNotification);
+    stayOpenBtn.setTooltip("Keep lyrics window visible across all tracks (always on top when switching tracks)");
+    stayOpenBtn.onClick = [this] {
+        const bool next = stayOpenBtn.getToggleState();
+        processor.setStayOpen(next);
+        if (processor.wrapperType == juce::AudioProcessor::wrapperType_Standalone)
+        {
+            if (auto* top = getTopLevelComponent())
+                top->setAlwaysOnTop(next);
+        }
+    };
+    addAndMakeVisible(stayOpenBtn);
 
     fontMinusBtn.setTooltip("Decrease lyrics font size");
     fontMinusBtn.onClick = [this] {
@@ -334,16 +372,17 @@ LyricsDisplayAudioProcessorEditor::LyricsDisplayAudioProcessorEditor(LyricsDispl
     startTimerHz(60);
 }
 
-LyricsDisplayAudioProcessorEditor::~LyricsDisplayAudioProcessorEditor()
+LyricsDisplayContent::~LyricsDisplayContent()
 {
     stopTimer();
     workerPool.removeAllJobs(true, 1000);
     setLookAndFeel(nullptr);
 }
 
-void LyricsDisplayAudioProcessorEditor::applyTheme()
+void LyricsDisplayContent::applyTheme()
 {
     const bool dark = processor.isDarkTheme();
+    lastAppliedDarkTheme = dark;
     palette = dark ? theme::darkPalette() : theme::lightPalette();
     lookAndFeel.setPalette(palette);
     lyricsViewport.setPalette(palette);
@@ -368,9 +407,16 @@ void LyricsDisplayAudioProcessorEditor::applyTheme()
     candidatesList.repaint();
 }
 
-void LyricsDisplayAudioProcessorEditor::syncFromProcessorState()
+void LyricsDisplayContent::syncFromProcessorState()
 {
     lastSyncedStateVersion = processor.getStateVersion();
+
+    if (processor.isDarkTheme() != lastAppliedDarkTheme)
+        applyTheme();
+
+    stayOpenBtn.setToggleState(processor.isStayOpen(), juce::dontSendNotification);
+    if (std::abs(lyricsViewport.getFontSize() - processor.getFontSize()) > 0.1f)
+        lyricsViewport.setFontSize(processor.getFontSize());
 
     const auto rec = processor.getLyricsRecord();
     const auto lines = processor.getParsedLines();
@@ -409,7 +455,7 @@ void LyricsDisplayAudioProcessorEditor::syncFromProcessorState()
     lyricsViewport.updatePlaybackTime(getEffectivePlaybackTimeSec(), rec.offsetSec, true);
 }
 
-void LyricsDisplayAudioProcessorEditor::updateMetadataUi()
+void LyricsDisplayContent::updateMetadataUi()
 {
     const auto rec = processor.getLyricsRecord();
     const bool hasLyrics = !rec.isEmpty();
@@ -420,21 +466,21 @@ void LyricsDisplayAudioProcessorEditor::updateMetadataUi()
     repaint(metaStripArea);
 }
 
-void LyricsDisplayAudioProcessorEditor::updateOffsetButtonText()
+void LyricsDisplayContent::updateOffsetButtonText()
 {
     const double off = processor.getLyricsRecord().offsetSec;
     const juce::String sign = off > 0.001 ? "+" : "";
     offsetResetBtn.setButtonText(sign + juce::String(off, 1) + "s");
 }
 
-void LyricsDisplayAudioProcessorEditor::setStatusMessage(const juce::String& text, bool isError)
+void LyricsDisplayContent::setStatusMessage(const juce::String& text, bool isError)
 {
     statusMessage = text;
     statusIsError = isError;
     repaint(metaStripArea);
 }
 
-double LyricsDisplayAudioProcessorEditor::getEffectivePlaybackTimeSec() const noexcept
+double LyricsDisplayContent::getEffectivePlaybackTimeSec() const noexcept
 {
     const auto transport = processor.getTransportSnapshot();
     if (transport.hasHostTransport)
@@ -442,7 +488,7 @@ double LyricsDisplayAudioProcessorEditor::getEffectivePlaybackTimeSec() const no
     return previewTimeSec;
 }
 
-void LyricsDisplayAudioProcessorEditor::timerCallback()
+void LyricsDisplayContent::timerCallback()
 {
     if (processor.getStateVersion() != lastSyncedStateVersion)
         syncFromProcessorState();
@@ -486,7 +532,7 @@ void LyricsDisplayAudioProcessorEditor::timerCallback()
     repaint(transportPillRect);
 }
 
-void LyricsDisplayAudioProcessorEditor::startLrclibSearch(const juce::String& query, double expectedDurationSec, bool autoPickBest)
+void LyricsDisplayContent::startLrclibSearch(const juce::String& query, double expectedDurationSec, bool autoPickBest)
 {
     const auto cleaned = query.trim();
     if (cleaned.isEmpty())
@@ -498,7 +544,7 @@ void LyricsDisplayAudioProcessorEditor::startLrclibSearch(const juce::String& qu
     if (autoPickBest)
         lyricsViewport.setPlaceholderMessage("Searching LRCLIB...", cleaned);
 
-    juce::Component::SafePointer<LyricsDisplayAudioProcessorEditor> safeThis(this);
+    juce::Component::SafePointer<LyricsDisplayContent> safeThis(this);
     workerPool.addJob([safeThis, token, cleaned, expectedDurationSec, autoPickBest] {
         auto result = lyrics_service::searchLrclib(cleaned, expectedDurationSec);
 
@@ -552,7 +598,7 @@ void LyricsDisplayAudioProcessorEditor::startLrclibSearch(const juce::String& qu
     });
 }
 
-void LyricsDisplayAudioProcessorEditor::applySelectedLyrics(const LyricsRecord& record)
+void LyricsDisplayContent::applySelectedLyrics(const LyricsRecord& record)
 {
     isEditing = false;
     rawEditor.setVisible(false);
@@ -568,7 +614,7 @@ void LyricsDisplayAudioProcessorEditor::applySelectedLyrics(const LyricsRecord& 
     repaint();
 }
 
-void LyricsDisplayAudioProcessorEditor::nudgeOffset(double deltaSec)
+void LyricsDisplayContent::nudgeOffset(double deltaSec)
 {
     auto rec = processor.getLyricsRecord();
     if (!rec.hasSynced())
@@ -581,7 +627,7 @@ void LyricsDisplayAudioProcessorEditor::nudgeOffset(double deltaSec)
     setStatusMessage("Timing offset: " + offsetResetBtn.getButtonText());
 }
 
-void LyricsDisplayAudioProcessorEditor::resetOffset()
+void LyricsDisplayContent::resetOffset()
 {
     auto rec = processor.getLyricsRecord();
     if (!rec.hasSynced())
@@ -593,7 +639,7 @@ void LyricsDisplayAudioProcessorEditor::resetOffset()
     setStatusMessage("Timing offset reset to 0.0s");
 }
 
-void LyricsDisplayAudioProcessorEditor::enterEditMode()
+void LyricsDisplayContent::enterEditMode()
 {
     isEditing = true;
     const auto rec = processor.getLyricsRecord();
@@ -607,7 +653,7 @@ void LyricsDisplayAudioProcessorEditor::enterEditMode()
     rawEditor.grabKeyboardFocus();
 }
 
-void LyricsDisplayAudioProcessorEditor::exitEditMode(bool saveChanges)
+void LyricsDisplayContent::exitEditMode(bool saveChanges)
 {
     if (!isEditing)
         return;
@@ -657,7 +703,7 @@ void LyricsDisplayAudioProcessorEditor::exitEditMode(bool saveChanges)
     resized();
 }
 
-void LyricsDisplayAudioProcessorEditor::importLyricsFile()
+void LyricsDisplayContent::importLyricsFile()
 {
     const auto startDir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
     activeFileChooser = std::make_unique<juce::FileChooser>(
@@ -683,7 +729,7 @@ void LyricsDisplayAudioProcessorEditor::importLyricsFile()
     });
 }
 
-void LyricsDisplayAudioProcessorEditor::exportLyricsFile()
+void LyricsDisplayContent::exportLyricsFile()
 {
     const auto rec = processor.getLyricsRecord();
     if (rec.isEmpty())
@@ -711,28 +757,30 @@ void LyricsDisplayAudioProcessorEditor::exportLyricsFile()
     });
 }
 
-void LyricsDisplayAudioProcessorEditor::mouseDown(const juce::MouseEvent&)
+void LyricsDisplayContent::mouseDown(const juce::MouseEvent&)
 {
     // Release text editor focus so Ableton Live Spacebar play/pause works smoothly
     unfocusAllComponents();
 }
 
-void LyricsDisplayAudioProcessorEditor::resized()
+void LyricsDisplayContent::resized()
 {
     auto area = getLocalBounds().reduced(12);
 
     // Header bar
     headerArea = area.removeFromTop(34);
     auto hdr = headerArea;
-    brandLabel.setBounds(hdr.removeFromLeft(138));
-    hdr.removeFromLeft(8);
+    brandLabel.setBounds(hdr.removeFromLeft(isFloating ? 198 : 134));
+    hdr.removeFromLeft(6);
 
-    themeToggleBtn.setBounds(hdr.removeFromRight(58).reduced(0, 3));
-    hdr.removeFromRight(6);
-    fontPlusBtn.setBounds(hdr.removeFromRight(36).reduced(0, 3));
+    themeToggleBtn.setBounds(hdr.removeFromRight(56).reduced(0, 3));
+    hdr.removeFromRight(5);
+    fontPlusBtn.setBounds(hdr.removeFromRight(34).reduced(0, 3));
     hdr.removeFromRight(4);
-    fontMinusBtn.setBounds(hdr.removeFromRight(36).reduced(0, 3));
-    hdr.removeFromRight(10);
+    fontMinusBtn.setBounds(hdr.removeFromRight(34).reduced(0, 3));
+    hdr.removeFromRight(6);
+    stayOpenBtn.setBounds(hdr.removeFromRight(80).reduced(0, 3));
+    hdr.removeFromRight(8);
 
     transportPillRect = hdr.reduced(0, 3);
 
@@ -817,12 +865,12 @@ void LyricsDisplayAudioProcessorEditor::resized()
     }
 }
 
-void LyricsDisplayAudioProcessorEditor::paint(juce::Graphics& g)
+void LyricsDisplayContent::paint(juce::Graphics& g)
 {
     g.fillAll(palette.bg);
 
     // Transport pill in header
-    if (!transportPillRect.isEmpty())
+    if (!transportPillRect.isEmpty() && transportPillRect.getWidth() >= 90)
     {
         const auto tr = processor.getTransportSnapshot();
         const double timeSec = getEffectivePlaybackTimeSec();
@@ -835,11 +883,11 @@ void LyricsDisplayAudioProcessorEditor::paint(juce::Graphics& g)
             : (previewPlaying ? "PREVIEW" : "STANDALONE");
 
         juce::String pillTxt = modeTxt + juce::String::fromUTF8("  •  ") + lyrics::formatTimePrecise(timeSec);
-        if (tr.hasHostTransport && tr.bpm > 1.0)
+        if (tr.hasHostTransport && tr.bpm > 1.0 && transportPillRect.getWidth() >= 230)
             pillTxt += juce::String::fromUTF8("  •  ") + juce::String(tr.bpm, 1) + " BPM";
 
         auto pill = transportPillRect.toFloat();
-        const float maxW = std::min(pill.getWidth(), 320.0f);
+        const float maxW = std::min(pill.getWidth(), 300.0f);
         auto drawPill = pill.withWidth(maxW);
 
         g.setColour(palette.surface);
@@ -918,4 +966,256 @@ void LyricsDisplayAudioProcessorEditor::paint(juce::Graphics& g)
         g.setColour(palette.border);
         g.drawRoundedRectangle(pb.reduced(0.5f), 8.0f, 1.0f);
     }
+}
+
+//==============================================================================
+// FloatingWindowManager
+//==============================================================================
+
+class FloatingWindowManager::PinnedWindow : public juce::DocumentWindow
+{
+public:
+    PinnedWindow(LyricsDisplayAudioProcessor& p, std::function<void()> onClose)
+        : DocumentWindow("Lyrics Display (Pinned)",
+                         p.isDarkTheme() ? theme::darkPalette().bg : theme::lightPalette().bg,
+                         DocumentWindow::minimiseButton | DocumentWindow::closeButton),
+          onCloseCallback(std::move(onClose))
+    {
+        setUsingNativeTitleBar(true);
+        setResizable(true, true);
+        setResizeLimits(520, 380, 1920, 1200);
+        setAlwaysOnTop(true);
+        setContentOwned(new LyricsDisplayContent(p, true), false);
+    }
+
+    void closeButtonPressed() override
+    {
+        if (onCloseCallback)
+            onCloseCallback();
+    }
+
+private:
+    std::function<void()> onCloseCallback;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PinnedWindow)
+};
+
+FloatingWindowManager::FloatingWindowManager(LyricsDisplayAudioProcessor& p)
+    : processor(p)
+{
+}
+
+FloatingWindowManager::~FloatingWindowManager()
+{
+    shutdown();
+}
+
+void FloatingWindowManager::shutdown()
+{
+    shuttingDown = true;
+    if (aliveToken)
+        *aliveToken = false;
+
+    stopTimer();
+    hostEditor = nullptr;
+
+    if (floatingWindow)
+    {
+        if (juce::MessageManager::existsAndIsCurrentThread())
+        {
+            floatingWindow.reset();
+        }
+        else
+        {
+            // Release raw pointer onto message thread if destructor is ever called off-thread
+            auto* raw = floatingWindow.release();
+            juce::MessageManager::callAsync([raw] { delete raw; });
+        }
+    }
+}
+
+void FloatingWindowManager::onHostEditorOpened(juce::AudioProcessorEditor* editor)
+{
+    if (shuttingDown)
+        return;
+
+    hostEditor = editor;
+    userDismissedFloating = false;
+    lastHostVisible = true;
+
+    if (processor.wrapperType == juce::AudioProcessor::wrapperType_Standalone)
+    {
+        if (editor != nullptr)
+        {
+            if (auto* top = editor->getTopLevelComponent())
+                top->setAlwaysOnTop(processor.isStayOpen());
+        }
+        return;
+    }
+
+    hideFloatingWindow(true);
+    startTimer(150);
+}
+
+void FloatingWindowManager::onHostEditorClosed(juce::AudioProcessorEditor* editor,
+                                               juce::Rectangle<int> lastScreenBounds)
+{
+    if (hostEditor == editor)
+        hostEditor = nullptr;
+
+    if (!lastScreenBounds.isEmpty())
+        savedBounds = lastScreenBounds;
+
+    if (shuttingDown || processor.wrapperType == juce::AudioProcessor::wrapperType_Standalone)
+        return;
+
+    if (processor.isStayOpen() && !userDismissedFloating)
+    {
+        std::weak_ptr<bool> weakAlive = aliveToken;
+        juce::MessageManager::callAsync([this, weakAlive] {
+            if (auto lock = weakAlive.lock())
+            {
+                if (*lock && !shuttingDown && hostEditor == nullptr && processor.isStayOpen() && !userDismissedFloating)
+                    showFloatingWindow();
+            }
+        });
+    }
+    else
+    {
+        stopTimer();
+    }
+}
+
+void FloatingWindowManager::onStayOpenChanged(bool enabled)
+{
+    if (shuttingDown)
+        return;
+
+    if (processor.wrapperType == juce::AudioProcessor::wrapperType_Standalone)
+    {
+        if (hostEditor != nullptr)
+        {
+            if (auto* top = hostEditor->getTopLevelComponent())
+                top->setAlwaysOnTop(enabled);
+        }
+        return;
+    }
+
+    if (!enabled)
+    {
+        hideFloatingWindow(true);
+        if (hostEditor == nullptr)
+            stopTimer();
+    }
+    else
+    {
+        userDismissedFloating = false;
+        if (hostEditor != nullptr && !isNativeWindowVisible(hostEditor.getComponent()))
+            showFloatingWindow();
+    }
+}
+
+void FloatingWindowManager::timerCallback()
+{
+    if (shuttingDown)
+        return;
+
+    if (hostEditor != nullptr)
+    {
+        const bool hostVisibleNow = isNativeWindowVisible(hostEditor.getComponent());
+        if (hostVisibleNow)
+        {
+            const auto sb = hostEditor->getScreenBounds();
+            if (!sb.isEmpty())
+                savedBounds = sb;
+
+            if (!lastHostVisible)
+                userDismissedFloating = false;
+
+            if (floatingWindow != nullptr)
+                hideFloatingWindow(true);
+        }
+        else if (processor.isStayOpen() && !userDismissedFloating)
+        {
+            if (floatingWindow == nullptr)
+                showFloatingWindow();
+        }
+        lastHostVisible = hostVisibleNow;
+    }
+    else if (floatingWindow != nullptr)
+    {
+        const auto sb = floatingWindow->getScreenBounds();
+        if (!sb.isEmpty())
+            savedBounds = sb;
+    }
+}
+
+void FloatingWindowManager::showFloatingWindow()
+{
+    if (shuttingDown || floatingWindow != nullptr)
+        return;
+
+    floatingWindow = std::make_unique<PinnedWindow>(processor, [this] { handleFloatingClosedByUser(); });
+
+    if (!savedBounds.isEmpty())
+    {
+        const int w = juce::jlimit(520, 1920, savedBounds.getWidth());
+        const int h = juce::jlimit(380, 1200, savedBounds.getHeight());
+        floatingWindow->setBounds(savedBounds.getX(), savedBounds.getY(), w, h);
+    }
+    else
+    {
+        floatingWindow->centreWithSize(740, 600);
+    }
+
+    floatingWindow->setVisible(true);
+    startTimer(150);
+}
+
+void FloatingWindowManager::hideFloatingWindow(bool rememberBounds)
+{
+    if (floatingWindow == nullptr)
+        return;
+
+    if (rememberBounds)
+    {
+        const auto sb = floatingWindow->getScreenBounds();
+        if (!sb.isEmpty())
+            savedBounds = sb;
+    }
+
+    floatingWindow.reset();
+}
+
+void FloatingWindowManager::handleFloatingClosedByUser()
+{
+    userDismissedFloating = true;
+    hideFloatingWindow(true);
+    if (hostEditor == nullptr)
+        stopTimer();
+}
+
+//==============================================================================
+// LyricsDisplayAudioProcessorEditor
+//==============================================================================
+
+LyricsDisplayAudioProcessorEditor::LyricsDisplayAudioProcessorEditor(LyricsDisplayAudioProcessor& p)
+    : AudioProcessorEditor(&p), processor(p), content(p, false)
+{
+    setResizable(true, true);
+    setResizeLimits(520, 380, 1920, 1200);
+    setSize(740, 600);
+
+    addAndMakeVisible(content);
+    processor.onHostEditorOpened(this);
+}
+
+LyricsDisplayAudioProcessorEditor::~LyricsDisplayAudioProcessorEditor()
+{
+    processor.onHostEditorClosed(this, getScreenBounds());
+}
+
+void LyricsDisplayAudioProcessorEditor::resized()
+{
+    content.setBounds(getLocalBounds());
 }

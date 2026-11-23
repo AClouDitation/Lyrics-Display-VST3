@@ -4,11 +4,19 @@
 LyricsDisplayAudioProcessor::LyricsDisplayAudioProcessor()
     : AudioProcessor(BusesProperties()
                          .withInput("Input", juce::AudioChannelSet::stereo(), true)
-                         .withOutput("Output", juce::AudioChannelSet::stereo(), true))
+                         .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
+      floatingManager(std::make_unique<FloatingWindowManager>(*this))
 {
     auto settings = lyrics_service::loadAppSettings();
     darkTheme.store(settings.darkTheme);
     fontSize.store(settings.fontSize);
+    stayOpen.store(settings.stayOpen);
+}
+
+LyricsDisplayAudioProcessor::~LyricsDisplayAudioProcessor()
+{
+    if (floatingManager)
+        floatingManager->shutdown();
 }
 
 void LyricsDisplayAudioProcessor::prepareToPlay(double, int) {}
@@ -124,14 +132,38 @@ void LyricsDisplayAudioProcessor::setLastSearchQuery(const juce::String& query)
 void LyricsDisplayAudioProcessor::setDarkTheme(bool dark)
 {
     darkTheme.store(dark);
-    lyrics_service::saveAppSettings({ dark, fontSize.load() });
+    lyrics_service::saveAppSettings({ dark, fontSize.load(), stayOpen.load() });
+    stateVersion.fetch_add(1, std::memory_order_release);
 }
 
 void LyricsDisplayAudioProcessor::setFontSize(float size)
 {
     const float clamped = juce::jlimit(13.0f, 38.0f, size);
     fontSize.store(clamped);
-    lyrics_service::saveAppSettings({ darkTheme.load(), clamped });
+    lyrics_service::saveAppSettings({ darkTheme.load(), clamped, stayOpen.load() });
+    stateVersion.fetch_add(1, std::memory_order_release);
+}
+
+void LyricsDisplayAudioProcessor::setStayOpen(bool enabled)
+{
+    stayOpen.store(enabled);
+    lyrics_service::saveAppSettings({ darkTheme.load(), fontSize.load(), enabled });
+    stateVersion.fetch_add(1, std::memory_order_release);
+    if (floatingManager)
+        floatingManager->onStayOpenChanged(enabled);
+}
+
+void LyricsDisplayAudioProcessor::onHostEditorOpened(juce::AudioProcessorEditor* editor)
+{
+    if (floatingManager)
+        floatingManager->onHostEditorOpened(editor);
+}
+
+void LyricsDisplayAudioProcessor::onHostEditorClosed(juce::AudioProcessorEditor* editor,
+                                                     juce::Rectangle<int> lastScreenBounds)
+{
+    if (floatingManager)
+        floatingManager->onHostEditorClosed(editor, lastScreenBounds);
 }
 
 void LyricsDisplayAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
@@ -147,6 +179,7 @@ void LyricsDisplayAudioProcessor::getStateInformation(juce::MemoryBlock& destDat
 
     root->setProperty("darkTheme", darkTheme.load());
     root->setProperty("fontSize", static_cast<double>(fontSize.load()));
+    root->setProperty("stayOpen", stayOpen.load());
 
     const juce::String json = juce::JSON::toString(juce::var(root), false);
     const auto utf8 = json.toRawUTF8();
@@ -185,6 +218,10 @@ void LyricsDisplayAudioProcessor::setStateInformation(const void* data, int size
         auto fs = obj->getProperty("fontSize");
         if (fs.isDouble() || fs.isInt())
             fontSize.store(juce::jlimit(13.0f, 38.0f, static_cast<float>(static_cast<double>(fs))));
+
+        auto stay = obj->getProperty("stayOpen");
+        if (stay.isBool())
+            stayOpen.store(static_cast<bool>(stay));
 
         stateVersion.fetch_add(1, std::memory_order_release);
     }

@@ -15,6 +15,7 @@ struct AppSettings
 {
     bool darkTheme = true;
     float fontSize = 21.0f;
+    bool stayOpen = true;
 };
 
 namespace lyrics_service

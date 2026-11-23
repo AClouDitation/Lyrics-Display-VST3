@@ -4,13 +4,16 @@
 #include "LyricsService.h"
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <atomic>
+#include <memory>
 #include <vector>
+
+class FloatingWindowManager;
 
 class LyricsDisplayAudioProcessor : public juce::AudioProcessor
 {
 public:
     LyricsDisplayAudioProcessor();
-    ~LyricsDisplayAudioProcessor() override = default;
+    ~LyricsDisplayAudioProcessor() override;
 
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void releaseResources() override;
@@ -66,6 +69,13 @@ public:
     float getFontSize() const noexcept { return fontSize.load(); }
     void setFontSize(float size);
 
+    bool isStayOpen() const noexcept { return stayOpen.load(); }
+    void setStayOpen(bool enabled);
+
+    // Host editor lifecycle hooks for always-visible pinned window handoff
+    void onHostEditorOpened(juce::AudioProcessorEditor* editor);
+    void onHostEditorClosed(juce::AudioProcessorEditor* editor, juce::Rectangle<int> lastScreenBounds);
+
     // Monotonic counter bumped whenever state changes (so editor can sync cleanly)
     juce::uint64 getStateVersion() const noexcept { return stateVersion.load(); }
 
@@ -83,7 +93,10 @@ private:
 
     std::atomic<bool> darkTheme { true };
     std::atomic<float> fontSize { 21.0f };
+    std::atomic<bool> stayOpen { true };
     std::atomic<juce::uint64> stateVersion { 1 };
+
+    std::unique_ptr<FloatingWindowManager> floatingManager;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LyricsDisplayAudioProcessor)
 };

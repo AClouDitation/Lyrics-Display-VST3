@@ -209,6 +209,10 @@ AppSettings loadAppSettings()
                 auto fs = obj->getProperty("fontSize");
                 if (fs.isDouble() || fs.isInt())
                     settings.fontSize = juce::jlimit(13.0f, 38.0f, static_cast<float>(static_cast<double>(fs)));
+
+                auto stay = obj->getProperty("stayOpen");
+                if (stay.isBool())
+                    settings.stayOpen = static_cast<bool>(stay);
             }
         }
     }
@@ -224,6 +228,7 @@ void saveAppSettings(const AppSettings& settings)
     auto* obj = new juce::DynamicObject();
     obj->setProperty("darkTheme", settings.darkTheme);
     obj->setProperty("fontSize", static_cast<double>(settings.fontSize));
+    obj->setProperty("stayOpen", settings.stayOpen);
 
     file.replaceWithText(juce::JSON::toString(juce::var(obj), false), false, false, "\n");
 }
