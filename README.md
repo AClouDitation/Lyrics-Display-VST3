@@ -58,6 +58,8 @@ Then drag **VST3 → AClouD → Lyrics Display** onto any Audio Track or the Mas
 
 ```text
 .
+├── .github/workflows/
+│   └── release.yml                 # Automated Windows VST3 build & GitHub Release workflow
 ├── CMakeLists.txt
 ├── src/
 │   ├── LyricsModel.h / .cpp        # LRC parser, query cleaner & JSON model

@@ -1,0 +1,92 @@
+name: Build and Release VST3
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v1.0.0)"
+        required: true
+        default: "v1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Determine release tag
+        id: meta
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ inputs.tag }}"
+          } else {
+            $tag = "${{ github.ref_name }}"
+          }
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Clone JUCE
+        shell: pwsh
+        run: git clone --depth 1 https://github.com/juce-framework/JUCE.git third_party/JUCE
+
+      - name: Configure CMake
+        shell: pwsh
+        run: cmake -B build -G "Visual Studio 17 2022" -A x64
+
+      - name: Build Release targets
+        shell: pwsh
+        run: cmake --build build --config Release --parallel
+
+      - name: Run unit tests
+        shell: pwsh
+        run: .\build\Release\LyricsModelTests.exe
+
+      - name: Package Windows VST3 & Standalone zip
+        id: pkg
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.meta.outputs.tag }}"
+          $stage = Join-Path $PWD "out\stage"
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          Copy-Item -Path "build\LyricsDisplay_artefacts\Release\VST3\Lyrics Display.vst3" -Destination $stage -Recurse -Force
+          Copy-Item -Path "build\LyricsDisplay_artefacts\Release\Standalone\Lyrics Display.exe" -Destination $stage -Force
+          Copy-Item -Path "README.md" -Destination $stage -Force
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zipName = "Lyrics-Display-$tag-win64-vst3.zip"
+          $zipPath = Join-Path $PWD "out\$zipName"
+          [System.IO.Compression.ZipFile]::CreateFromDirectory(
+            $stage,
+            $zipPath,
+            [System.IO.Compression.CompressionLevel]::Optimal,
+            $false
+          )
+          "zip_path=$zipPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "zip_name=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.meta.outputs.tag }}"
+          $zip = "${{ steps.pkg.outputs.zip_path }}"
+          $prev = $ErrorActionPreference
+          $ErrorActionPreference = "Continue"
+          gh release view $tag *> $null
+          $exists = ($LASTEXITCODE -eq 0)
+          $ErrorActionPreference = $prev
+          if ($exists) {
+            gh release upload $tag $zip --clobber
+          } else {
+            gh release create $tag $zip `
+              --title "Lyrics Display $tag" `
+              --generate-notes
+          }
