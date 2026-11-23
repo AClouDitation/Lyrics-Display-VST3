@@ -62,4 +62,8 @@ namespace lyrics
 
     // Find active lyric line index for (playbackSec + offsetSec) with 0.05s lookahead
     int findActiveLineIndex(const std::vector<LyricLine>& lines, double effectiveTimeSec);
+
+    // Compare semantic version strings like "v1.2.3" and "1.0.0" (-1, 0, +1)
+    int compareSemver(const juce::String& a, const juce::String& b);
+    bool isNewerVersion(const juce::String& candidate, const juce::String& current);
 } // namespace lyrics

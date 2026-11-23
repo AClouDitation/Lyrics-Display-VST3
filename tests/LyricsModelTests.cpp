@@ -85,6 +85,16 @@ void testJsonRoundTrip()
     expect(std::abs(restored.offsetSec - orig.offsetSec) < 1e-6, "Round-trip offset");
     expect(restored.syncedLyrics == orig.syncedLyrics, "Round-trip syncedLyrics");
 }
+
+void testSemverComparison()
+{
+    expect(lyrics::compareSemver("v1.0.0", "1.0.0") == 0, "v prefix ignored in semver");
+    expect(lyrics::isNewerVersion("v1.2.0", "1.0.0"), "1.2.0 > 1.0.0");
+    expect(lyrics::isNewerVersion("v2.0.0", "1.9.9"), "2.0.0 > 1.9.9");
+    expect(!lyrics::isNewerVersion("v1.0.0", "1.0.0"), "same version is not newer");
+    expect(!lyrics::isNewerVersion("v0.9.5", "1.0.0"), "older version is not newer");
+    expect(lyrics::isNewerVersion("v1.0.1-beta", "1.0.0"), "prerelease tag stripped cleanly");
+}
 } // namespace
 
 int main()
@@ -93,6 +103,7 @@ int main()
     testActiveLineLookup();
     testCleanTrackQuery();
     testJsonRoundTrip();
+    testSemverComparison();
 
     if (failures == 0)
     {

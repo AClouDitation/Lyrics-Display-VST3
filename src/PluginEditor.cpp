@@ -10,23 +10,14 @@
   #define NOMINMAX
  #endif
  #include <windows.h>
+ #include <commctrl.h>
 #endif
 
 namespace
 {
-bool isNativeWindowVisible(juce::Component* comp)
-{
-    if (comp == nullptr || !comp->isShowing())
-        return false;
 #if JUCE_WINDOWS
-    if (auto* peer = comp->getPeer())
-    {
-        if (auto* hwnd = static_cast<HWND>(peer->getNativeHandle()))
-            return ::IsWindowVisible(hwnd) != FALSE;
-    }
+constexpr UINT_PTR kHostPinSubclassId = 0x4C595244; // 'LYRD'
 #endif
-    return true;
-}
 } // namespace
 
 //==============================================================================
@@ -261,6 +252,14 @@ LyricsDisplayContent::LyricsDisplayContent(LyricsDisplayAudioProcessor& p)
     brandLabel.setFont(theme::makeUiFont(14.0f, true));
     addAndMakeVisible(brandLabel);
 
+    tabLyricsBtn.setToggleState(true, juce::dontSendNotification);
+    tabLyricsBtn.onClick = [this] { setActiveTab(ActiveTab::Lyrics); };
+    addAndMakeVisible(tabLyricsBtn);
+
+    tabInfoBtn.setToggleState(false, juce::dontSendNotification);
+    tabInfoBtn.onClick = [this] { setActiveTab(ActiveTab::Info); };
+    addAndMakeVisible(tabInfoBtn);
+
     stayOpenBtn.getProperties().set("pinIcon", true);
     stayOpenBtn.setClickingTogglesState(true);
     auto updatePinTooltip = [this](bool isPinned) {
@@ -421,8 +420,57 @@ LyricsDisplayContent::LyricsDisplayContent(LyricsDisplayAudioProcessor& p)
     };
     addChildComponent(previewSlider);
 
+    // Info tab controls
+    openGithubBtn.setTooltip(lyrics_service::kGithubRepoUrl);
+    openGithubBtn.onClick = [] {
+        juce::URL(lyrics_service::kGithubRepoUrl).launchInDefaultBrowser();
+    };
+    addChildComponent(openGithubBtn);
+
+    openReleasesBtn.setTooltip("Open GitHub Releases page in your browser");
+    openReleasesBtn.onClick = [this] {
+        const juce::String target = (hasCheckedRelease && latestRelease.htmlUrl.isNotEmpty())
+            ? latestRelease.htmlUrl
+            : (juce::String(lyrics_service::kGithubRepoUrl) + "/releases");
+        juce::URL(target).launchInDefaultBrowser();
+    };
+    addChildComponent(openReleasesBtn);
+
+    checkUpdateBtn.setTooltip("Check GitHub for the latest release version");
+    checkUpdateBtn.onClick = [this] { checkForGithubUpdate(false); };
+    addChildComponent(checkUpdateBtn);
+
+    pullReleaseBtn.getProperties().set("primary", true);
+    pullReleaseBtn.setTooltip("Download the latest release from GitHub into your Downloads folder");
+    pullReleaseBtn.onClick = [this] {
+        if (hasCheckedRelease && latestRelease.ok && latestRelease.downloadUrl.isNotEmpty())
+            pullLatestGithubRelease();
+        else
+            checkForGithubUpdate(true);
+    };
+    addChildComponent(pullReleaseBtn);
+
+    openDownloadDirBtn.setEnabled(false);
+    openDownloadDirBtn.setTooltip("Reveal the downloaded release folder in File Explorer");
+    openDownloadDirBtn.onClick = [this] {
+        if (lastDownloadedReleaseDir.isDirectory())
+            lastDownloadedReleaseDir.revealToUser();
+    };
+    addChildComponent(openDownloadDirBtn);
+
+    releaseNotesBox.setMultiLine(true, true);
+    releaseNotesBox.setReadOnly(true);
+    releaseNotesBox.setScrollbarsShown(true);
+    releaseNotesBox.setCaretVisible(false);
+    releaseNotesBox.setFont(theme::makeUiFont(13.0f, false));
+    releaseNotesBox.setText("Repository: " + juce::String(lyrics_service::kGithubRepoUrl)
+                            + "\n\nClick \"Check Updates\" to fetch the latest GitHub release notes, or \"Pull Latest Release\" to download the latest build directly into your Downloads folder.",
+                            false);
+    addChildComponent(releaseNotesBox);
+
     applyTheme();
     syncFromProcessorState();
+    setActiveTab(ActiveTab::Lyrics);
 
     lastTickMs = juce::Time::getMillisecondCounterHiRes();
     startTimerHz(60);
@@ -455,12 +503,192 @@ void LyricsDisplayContent::applyTheme()
     };
     restyleEditor(searchInput);
     restyleEditor(rawEditor);
+    restyleEditor(releaseNotesBox);
 
     candidatesList.setColour(juce::ListBox::backgroundColourId, palette.surface);
     candidatesList.setColour(juce::ListBox::outlineColourId, palette.border);
 
     repaint();
     candidatesList.repaint();
+}
+
+void LyricsDisplayContent::setActiveTab(ActiveTab tab)
+{
+    activeTab = tab;
+    const bool showLyricsTab = (activeTab == ActiveTab::Lyrics);
+    const bool showInfoTab = !showLyricsTab;
+
+    tabLyricsBtn.setToggleState(showLyricsTab, juce::dontSendNotification);
+    tabInfoBtn.setToggleState(showInfoTab, juce::dontSendNotification);
+
+    // Lyrics controls
+    searchInput.setVisible(showLyricsTab);
+    findBtn.setVisible(showLyricsTab);
+    importBtn.setVisible(showLyricsTab);
+    exportBtn.setVisible(showLyricsTab);
+    editBtn.setVisible(showLyricsTab);
+    offsetMinusBtn.setVisible(showLyricsTab);
+    offsetResetBtn.setVisible(showLyricsTab);
+    offsetPlusBtn.setVisible(showLyricsTab);
+
+    lyricsViewport.setVisible(showLyricsTab && !isEditing);
+    rawEditor.setVisible(showLyricsTab && isEditing);
+    rawSaveBtn.setVisible(showLyricsTab && isEditing);
+    rawCancelBtn.setVisible(showLyricsTab && isEditing);
+
+    const bool showCands = showLyricsTab && showCandidates && !candidates.empty();
+    candidatesList.setVisible(showCands);
+    closeCandidatesBtn.setVisible(showCands);
+
+    const bool showPreview = showLyricsTab && !processor.getTransportSnapshot().hasHostTransport;
+    previewPlayBtn.setVisible(showPreview);
+    previewRestartBtn.setVisible(showPreview);
+    previewSlider.setVisible(showPreview);
+
+    // Info controls
+    openGithubBtn.setVisible(showInfoTab);
+    openReleasesBtn.setVisible(showInfoTab);
+    checkUpdateBtn.setVisible(showInfoTab);
+    pullReleaseBtn.setVisible(showInfoTab);
+    openDownloadDirBtn.setVisible(showInfoTab);
+    releaseNotesBox.setVisible(showInfoTab);
+
+    resized();
+    repaint();
+}
+
+void LyricsDisplayContent::setUpdateStatus(const juce::String& text, bool isError, double progress)
+{
+    updateStatusText = text;
+    updateStatusIsError = isError;
+    updateProgress01 = progress;
+    repaint(infoUpdateCardRect);
+}
+
+void LyricsDisplayContent::updateInfoButtonsState()
+{
+    checkUpdateBtn.setEnabled(!isUpdatingRelease);
+    pullReleaseBtn.setEnabled(!isUpdatingRelease);
+    openDownloadDirBtn.setEnabled(lastDownloadedReleaseDir.isDirectory());
+}
+
+void LyricsDisplayContent::checkForGithubUpdate(bool pullAfterCheck)
+{
+    if (isUpdatingRelease)
+        return;
+
+    isUpdatingRelease = true;
+    const auto token = ++updateToken;
+    updateInfoButtonsState();
+    setUpdateStatus("Checking GitHub for the latest release...", false, -1.0);
+
+    juce::Component::SafePointer<LyricsDisplayContent> safeThis(this);
+    workerPool.addJob([safeThis, token, pullAfterCheck] {
+        auto info = lyrics_service::fetchLatestGithubRelease();
+
+        juce::MessageManager::callAsync([safeThis, token, info = std::move(info), pullAfterCheck]() mutable {
+            if (safeThis == nullptr || token != safeThis->updateToken)
+                return;
+
+            safeThis->isUpdatingRelease = false;
+            safeThis->hasCheckedRelease = true;
+            safeThis->latestRelease = std::move(info);
+            safeThis->updateInfoButtonsState();
+
+            if (!safeThis->latestRelease.ok)
+            {
+                safeThis->setUpdateStatus(safeThis->latestRelease.errorMessage,
+                                          !safeThis->latestRelease.noReleasesYet, -1.0);
+                safeThis->releaseNotesBox.setText(
+                    safeThis->latestRelease.errorMessage
+                        + "\n\nRepository: " + juce::String(lyrics_service::kGithubRepoUrl),
+                    false);
+                safeThis->repaint();
+                return;
+            }
+
+            const juce::String currentVer = JucePlugin_VersionString;
+            const bool newer = lyrics::isNewerVersion(safeThis->latestRelease.tagName, currentVer);
+
+            juce::String summary;
+            summary << "Release: " << safeThis->latestRelease.releaseName
+                    << " (" << safeThis->latestRelease.tagName << ")\n";
+            if (safeThis->latestRelease.publishedAt.isNotEmpty())
+                summary << "Published: " << safeThis->latestRelease.publishedAt.upToFirstOccurrenceOf("T", false, false) << "\n";
+            if (safeThis->latestRelease.assetName.isNotEmpty())
+            {
+                summary << "Package: " << safeThis->latestRelease.assetName;
+                if (safeThis->latestRelease.assetSizeBytes > 0)
+                    summary << juce::String::formatted(" (%.2f MB)", static_cast<double>(safeThis->latestRelease.assetSizeBytes) / 1048576.0);
+                summary << "\n";
+            }
+            if (safeThis->latestRelease.body.isNotEmpty())
+                summary << "\n" << safeThis->latestRelease.body;
+            safeThis->releaseNotesBox.setText(summary, false);
+
+            if (pullAfterCheck)
+            {
+                safeThis->pullLatestGithubRelease();
+                return;
+            }
+
+            if (newer)
+                safeThis->setUpdateStatus("Update available: " + safeThis->latestRelease.tagName
+                                          + " (installed: v" + currentVer + ")", false, -1.0);
+            else
+                safeThis->setUpdateStatus("You are up to date (latest: " + safeThis->latestRelease.tagName + ").", false, -1.0);
+
+            safeThis->repaint();
+        });
+    });
+}
+
+void LyricsDisplayContent::pullLatestGithubRelease()
+{
+    if (isUpdatingRelease || !latestRelease.ok)
+        return;
+
+    isUpdatingRelease = true;
+    const auto token = ++updateToken;
+    const auto releaseCopy = latestRelease;
+    updateInfoButtonsState();
+    setUpdateStatus("Starting download of " + releaseCopy.tagName + "...", false, 0.02);
+
+    juce::Component::SafePointer<LyricsDisplayContent> safeThis(this);
+    workerPool.addJob([safeThis, token, releaseCopy] {
+        auto dlRes = lyrics_service::downloadLatestGithubRelease(
+            releaseCopy,
+            [safeThis, token](double pct, const juce::String& stage) {
+                juce::MessageManager::callAsync([safeThis, token, pct, stage] {
+                    if (safeThis == nullptr || token != safeThis->updateToken)
+                        return;
+                    safeThis->setUpdateStatus(stage, false, pct);
+                });
+            });
+
+        juce::MessageManager::callAsync([safeThis, token, dlRes = std::move(dlRes), releaseCopy]() mutable {
+            if (safeThis == nullptr || token != safeThis->updateToken)
+                return;
+
+            safeThis->isUpdatingRelease = false;
+            if (!dlRes.ok)
+            {
+                safeThis->updateInfoButtonsState();
+                safeThis->setUpdateStatus(dlRes.errorMessage, true, -1.0);
+                return;
+            }
+
+            safeThis->lastDownloadedReleaseDir = dlRes.outputDir;
+            safeThis->updateInfoButtonsState();
+            safeThis->setUpdateStatus(
+                "Pulled " + releaseCopy.tagName + (dlRes.extracted ? " (extracted)" : "")
+                    + " — close Ableton Live, replace Lyrics Display.vst3, and reopen Live.",
+                false, 1.0);
+
+            if (dlRes.outputDir.isDirectory())
+                dlRes.outputDir.revealToUser();
+        });
+    });
 }
 
 void LyricsDisplayContent::syncFromProcessorState()
@@ -565,8 +793,8 @@ void LyricsDisplayContent::timerCallback()
 
     const auto transport = processor.getTransportSnapshot();
 
-    // Show preview bar only when running Standalone (no host transport)
-    const bool needPreviewBar = !transport.hasHostTransport;
+    // Show preview bar only when running Standalone (no host transport) and on Lyrics tab
+    const bool needPreviewBar = (activeTab == ActiveTab::Lyrics) && !transport.hasHostTransport;
     if (previewPlayBtn.isVisible() != needPreviewBar)
     {
         previewPlayBtn.setVisible(needPreviewBar);
@@ -670,7 +898,7 @@ void LyricsDisplayContent::applySelectedLyrics(const LyricsRecord& record)
     rawEditor.setVisible(false);
     rawSaveBtn.setVisible(false);
     rawCancelBtn.setVisible(false);
-    lyricsViewport.setVisible(true);
+    lyricsViewport.setVisible(activeTab == ActiveTab::Lyrics);
     editBtn.setButtonText("Edit");
 
     processor.setLyricsRecord(record);
@@ -836,8 +1064,12 @@ void LyricsDisplayContent::resized()
     // Header bar
     headerArea = area.removeFromTop(34);
     auto hdr = headerArea;
-    brandLabel.setBounds(hdr.removeFromLeft(134));
+    brandLabel.setBounds(hdr.removeFromLeft(126));
     hdr.removeFromLeft(6);
+    tabLyricsBtn.setBounds(hdr.removeFromLeft(56).reduced(0, 3));
+    hdr.removeFromLeft(4);
+    tabInfoBtn.setBounds(hdr.removeFromLeft(48).reduced(0, 3));
+    hdr.removeFromLeft(8);
 
     themeToggleBtn.setBounds(hdr.removeFromRight(56).reduced(0, 3));
     hdr.removeFromRight(5);
@@ -851,6 +1083,44 @@ void LyricsDisplayContent::resized()
     transportPillRect = hdr.reduced(0, 3);
 
     area.removeFromTop(8);
+
+    if (activeTab == ActiveTab::Info)
+    {
+        metaStripArea = {};
+        candidatesHeaderRect = {};
+        previewBarArea = {};
+
+        infoAboutCardRect = area.removeFromTop(104);
+        auto aboutInner = infoAboutCardRect.reduced(16, 14);
+        auto aboutRight = aboutInner.removeFromRight(120);
+        openGithubBtn.setBounds(aboutRight.withSizeKeepingCentre(116, 32));
+
+        area.removeFromTop(10);
+
+        infoUpdateCardRect = area;
+        auto updInner = infoUpdateCardRect.reduced(16, 14);
+        updInner.removeFromTop(28); // card heading + version badges
+        updInner.removeFromTop(8);
+
+        auto btnRow = updInner.removeFromTop(32);
+        pullReleaseBtn.setBounds(btnRow.removeFromLeft(152));
+        btnRow.removeFromLeft(8);
+        checkUpdateBtn.setBounds(btnRow.removeFromLeft(116));
+        btnRow.removeFromLeft(8);
+        openReleasesBtn.setBounds(btnRow.removeFromLeft(112));
+        btnRow.removeFromLeft(8);
+        openDownloadDirBtn.setBounds(btnRow.removeFromLeft(102));
+
+        updInner.removeFromTop(10);
+        infoProgressRect = updInner.removeFromTop(26);
+        updInner.removeFromTop(8);
+        releaseNotesBox.setBounds(updInner);
+        return;
+    }
+
+    infoAboutCardRect = {};
+    infoUpdateCardRect = {};
+    infoProgressRect = {};
 
     // Search & action bar
     auto searchRow = area.removeFromTop(32);
@@ -1032,302 +1302,283 @@ void LyricsDisplayContent::paint(juce::Graphics& g)
         g.setColour(palette.border);
         g.drawRoundedRectangle(pb.reduced(0.5f), 8.0f, 1.0f);
     }
+
+    // Info tab cards
+    if (activeTab == ActiveTab::Info)
+    {
+        if (!infoAboutCardRect.isEmpty())
+        {
+            auto card = infoAboutCardRect.toFloat();
+            g.setColour(palette.surface);
+            g.fillRoundedRectangle(card, 10.0f);
+            g.setColour(palette.border);
+            g.drawRoundedRectangle(card.reduced(0.5f), 10.0f, 1.0f);
+
+            auto inner = infoAboutCardRect.reduced(16, 14).withTrimmedRight(130);
+            auto titleRow = inner.removeFromTop(26);
+            g.setFont(theme::makeUiFont(16.0f, true));
+            g.setColour(palette.text);
+            g.drawText("Lyrics Display", titleRow.removeFromLeft(130), juce::Justification::centredLeft, false);
+
+            const juce::String verText = "v" + juce::String(JucePlugin_VersionString);
+            auto verBadge = titleRow.removeFromLeft(58).reduced(0, 3).toFloat();
+            g.setColour(palette.accentSoft);
+            g.fillRoundedRectangle(verBadge, 5.0f);
+            g.setFont(theme::makeMonoFont(11.0f, true));
+            g.setColour(palette.accent);
+            g.drawText(verText, verBadge.toNearestInt(), juce::Justification::centred, false);
+
+            inner.removeFromTop(4);
+            g.setFont(theme::makeUiFont(12.5f, false));
+            g.setColour(palette.textMuted);
+            g.drawText("Synchronized karaoke lyrics VST3 plugin for Ableton Live 11 & VST3 hosts.",
+                       inner.removeFromTop(20), juce::Justification::centredLeft, true);
+
+            inner.removeFromTop(4);
+            g.setFont(theme::makeMonoFont(11.5f, false));
+            g.setColour(palette.accent);
+            g.drawText(lyrics_service::kGithubRepoUrl, inner.removeFromTop(18),
+                       juce::Justification::centredLeft, true);
+        }
+
+        if (!infoUpdateCardRect.isEmpty())
+        {
+            auto card = infoUpdateCardRect.toFloat();
+            g.setColour(palette.surface);
+            g.fillRoundedRectangle(card, 10.0f);
+            g.setColour(palette.border);
+            g.drawRoundedRectangle(card.reduced(0.5f), 10.0f, 1.0f);
+
+            auto headingRow = infoUpdateCardRect.reduced(16, 14).removeFromTop(24);
+            g.setFont(theme::makeUiFont(14.5f, true));
+            g.setColour(palette.text);
+            g.drawText("GitHub Releases & Updates", headingRow.removeFromLeft(210),
+                       juce::Justification::centredLeft, false);
+
+            if (hasCheckedRelease && latestRelease.ok)
+            {
+                const bool newer = lyrics::isNewerVersion(latestRelease.tagName, JucePlugin_VersionString);
+                const juce::String pillTxt = newer
+                    ? ("Update: " + latestRelease.tagName)
+                    : (juce::String::fromUTF8("Up to date · ") + latestRelease.tagName);
+                const juce::Colour pillCol = newer ? palette.accent : palette.success;
+                const auto pillFont = theme::makeUiFont(11.0f, true);
+                const int pillW = juce::jlimit(90, 200, static_cast<int>(std::ceil(juce::GlyphArrangement::getStringWidth(pillFont, pillTxt))) + 20);
+                auto pill = headingRow.removeFromRight(pillW).reduced(0, 2).toFloat();
+                g.setColour(pillCol.withAlpha(0.18f));
+                g.fillRoundedRectangle(pill, 5.0f);
+                g.setFont(pillFont);
+                g.setColour(pillCol);
+                g.drawText(pillTxt, pill.toNearestInt(), juce::Justification::centred, true);
+            }
+
+            if (!infoProgressRect.isEmpty())
+            {
+                auto progArea = infoProgressRect;
+                auto statusRow = progArea.removeFromTop(18);
+                g.setFont(theme::makeUiFont(12.0f, false));
+                g.setColour(updateStatusIsError ? palette.danger : palette.textMuted);
+                g.drawText(updateStatusText, statusRow, juce::Justification::centredLeft, true);
+
+                if (updateProgress01 >= 0.0)
+                {
+                    auto track = progArea.reduced(0, 1).toFloat();
+                    track = track.withHeight(std::max(4.0f, track.getHeight()));
+                    g.setColour(palette.surfaceAlt);
+                    g.fillRoundedRectangle(track, 3.0f);
+                    g.setColour(updateProgress01 >= 0.999 ? palette.success : palette.accent);
+                    g.fillRoundedRectangle(track.withWidth(track.getWidth() * static_cast<float>(juce::jlimit(0.0, 1.0, updateProgress01))), 3.0f);
+                }
+            }
+        }
+    }
 }
 
 //==============================================================================
-// FloatingWindowManager
+// LyricsDisplayAudioProcessorEditor (single panel instance with host pin hook)
 //==============================================================================
 
-class FloatingWindowManager::PinnedWindow : public juce::DocumentWindow
+#if JUCE_WINDOWS
+namespace
 {
-public:
-    PinnedWindow(LyricsDisplayAudioProcessor& p, std::function<void()> onClose)
-        : DocumentWindow("Lyrics Display",
-                         p.isDarkTheme() ? theme::darkPalette().bg : theme::lightPalette().bg,
-                         DocumentWindow::minimiseButton | DocumentWindow::closeButton),
-          onCloseCallback(std::move(onClose))
-    {
-        setUsingNativeTitleBar(true);
-        setResizable(true, true);
-        setResizeLimits(520, 380, 1920, 1200);
-        setAlwaysOnTop(p.isStayOpen());
-    }
-
-    void closeButtonPressed() override
-    {
-        if (onCloseCallback)
-            onCloseCallback();
-    }
-
-private:
-    std::function<void()> onCloseCallback;
-
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PinnedWindow)
+struct HostPinHookContext
+{
+    LyricsDisplayAudioProcessor* processor = nullptr;
+    bool* allowHostHide = nullptr;
+    void** subclassedHostHwnd = nullptr;
 };
 
-FloatingWindowManager::FloatingWindowManager(LyricsDisplayAudioProcessor& p)
-    : processor(p)
+LRESULT CALLBACK hostWindowSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                                        UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
 {
-}
+    auto* ctx = reinterpret_cast<HostPinHookContext*>(dwRefData);
 
-FloatingWindowManager::~FloatingWindowManager()
-{
-    shutdown();
-}
-
-void FloatingWindowManager::shutdown()
-{
-    shuttingDown = true;
-    if (aliveToken)
-        *aliveToken = false;
-
-    stopTimer();
-
-    if (hostEditor != nullptr && sharedContent != nullptr)
-        hostEditor->removeChildComponent(sharedContent.get());
-    hostEditor = nullptr;
-
-    if (floatingWindow != nullptr)
-        floatingWindow->clearContentComponent();
-
-    if (juce::MessageManager::existsAndIsCurrentThread())
+    if (msg == WM_NCDESTROY)
     {
-        floatingWindow.reset();
-        sharedContent.reset();
-    }
-    else
-    {
-        auto* rawWin = floatingWindow.release();
-        auto* rawContent = sharedContent.release();
-        juce::MessageManager::callAsync([rawWin, rawContent] {
-            delete rawWin;
-            delete rawContent;
-        });
-    }
-}
-
-void FloatingWindowManager::ensureContentCreated()
-{
-    if (sharedContent == nullptr)
-        sharedContent = std::make_unique<LyricsDisplayContent>(processor);
-}
-
-void FloatingWindowManager::attachContentToHost()
-{
-    if (hostEditor == nullptr)
-        return;
-
-    ensureContentCreated();
-    if (floatingWindow != nullptr && floatingWindow->getContentComponent() == sharedContent.get())
-        floatingWindow->clearContentComponent();
-
-    if (sharedContent->getParentComponent() != hostEditor.getComponent())
-        hostEditor->addAndMakeVisible(sharedContent.get());
-
-    sharedContent->setBounds(hostEditor->getLocalBounds());
-}
-
-void FloatingWindowManager::onHostEditorOpened(juce::AudioProcessorEditor* editor)
-{
-    if (shuttingDown)
-        return;
-
-    hostEditor = editor;
-    userDismissedFloating = false;
-    lastHostVisible = true;
-
-    if (processor.wrapperType == juce::AudioProcessor::wrapperType_Standalone)
-    {
-        attachContentToHost();
-        if (editor != nullptr)
+        ::RemoveWindowSubclass(hwnd, &hostWindowSubclassProc, uIdSubclass);
+        if (ctx != nullptr)
         {
-            if (auto* top = editor->getTopLevelComponent())
-                top->setAlwaysOnTop(processor.isStayOpen());
+            if (ctx->subclassedHostHwnd != nullptr && *ctx->subclassedHostHwnd == hwnd)
+                *ctx->subclassedHostHwnd = nullptr;
+            delete ctx;
         }
-        return;
+        return ::DefSubclassProc(hwnd, msg, wParam, lParam);
     }
 
-    hideFloatingWindow(true);
-    attachContentToHost();
-    startTimer(150);
-}
-
-void FloatingWindowManager::onHostEditorClosed(juce::AudioProcessorEditor* editor,
-                                               juce::Rectangle<int> lastScreenBounds)
-{
-    if (hostEditor == editor)
+    if (ctx != nullptr && ctx->processor != nullptr && ctx->allowHostHide != nullptr)
     {
-        if (sharedContent != nullptr && sharedContent->getParentComponent() == editor)
-            editor->removeChildComponent(sharedContent.get());
-        hostEditor = nullptr;
-    }
+        if (msg == WM_CLOSE || msg == WM_DESTROY)
+        {
+            *ctx->allowHostHide = true;
+        }
+        else if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP || msg == WM_NCLBUTTONDOWN)
+        {
+            // Allow clicking the host window's own title-bar close ('x') button to close normally
+            POINT pt { static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)) };
+            if (msg != WM_NCLBUTTONDOWN)
+                ::ClientToScreen(hwnd, &pt);
 
-    if (!lastScreenBounds.isEmpty())
-        savedBounds = lastScreenBounds;
-
-    if (shuttingDown || processor.wrapperType == juce::AudioProcessor::wrapperType_Standalone)
-        return;
-
-    if (processor.isStayOpen() && !userDismissedFloating)
-    {
-        std::weak_ptr<bool> weakAlive = aliveToken;
-        juce::MessageManager::callAsync([this, weakAlive] {
-            if (auto lock = weakAlive.lock())
+            RECT wr {};
+            if (::GetWindowRect(hwnd, &wr))
             {
-                if (*lock && !shuttingDown && hostEditor == nullptr && processor.isStayOpen() && !userDismissedFloating)
-                    showFloatingWindow();
+                const bool inTopBar = (pt.y >= wr.top && pt.y <= wr.top + 34);
+                const bool inCloseBox = (pt.x >= wr.right - 38 && pt.x <= wr.right);
+                if (inTopBar && inCloseBox)
+                    *ctx->allowHostHide = true;
             }
-        });
-    }
-    else
-    {
-        stopTimer();
-    }
-}
-
-void FloatingWindowManager::onStayOpenChanged(bool enabled)
-{
-    if (shuttingDown)
-        return;
-
-    if (processor.wrapperType == juce::AudioProcessor::wrapperType_Standalone)
-    {
-        if (hostEditor != nullptr)
-        {
-            if (auto* top = hostEditor->getTopLevelComponent())
-                top->setAlwaysOnTop(enabled);
         }
-        return;
-    }
-
-    // Never hide an already-visible window on toggle — only update its pinned/topmost state
-    if (floatingWindow != nullptr && floatingWindow->isVisible())
-        floatingWindow->setAlwaysOnTop(enabled);
-
-    if (enabled)
-    {
-        userDismissedFloating = false;
-        if (hostEditor != nullptr && !isNativeWindowVisible(hostEditor.getComponent()))
-            showFloatingWindow();
-    }
-}
-
-void FloatingWindowManager::timerCallback()
-{
-    if (shuttingDown)
-        return;
-
-    if (hostEditor != nullptr)
-    {
-        const bool hostVisibleNow = isNativeWindowVisible(hostEditor.getComponent());
-        if (hostVisibleNow)
+        else if (msg == WM_WINDOWPOSCHANGING && lParam != 0)
         {
-            const auto sb = hostEditor->getScreenBounds();
-            if (!sb.isEmpty())
-                savedBounds = sb;
+            auto* wp = reinterpret_cast<WINDOWPOS*>(lParam);
+            if ((wp->flags & SWP_HIDEWINDOW) != 0)
+            {
+                const bool pinOn = ctx->processor->isStayOpen();
+                HWND owner = ::GetWindow(hwnd, GW_OWNER);
+                const bool ownerMinimized = (owner != nullptr && ::IsIconic(owner) != FALSE);
 
-            if (!lastHostVisible)
-                userDismissedFloating = false;
-
-            if (floatingWindow != nullptr && floatingWindow->isVisible())
-                hideFloatingWindow(true);
-
-            attachContentToHost();
+                if (pinOn && !(*ctx->allowHostHide) && !ownerMinimized)
+                {
+                    // Prevent DAW Auto-Hide on track switch from hiding this single panel
+                    wp->flags &= ~static_cast<UINT>(SWP_HIDEWINDOW);
+                    wp->flags |= SWP_NOACTIVATE;
+                }
+                else
+                {
+                    *ctx->allowHostHide = false;
+                }
+            }
+            else if ((wp->flags & SWP_SHOWWINDOW) != 0)
+            {
+                *ctx->allowHostHide = false;
+            }
         }
-        else if (processor.isStayOpen() && !userDismissedFloating)
+        else if (msg == WM_SHOWWINDOW && wParam == FALSE && lParam == 0)
         {
-            if (floatingWindow == nullptr || !floatingWindow->isVisible())
-                showFloatingWindow();
+            const bool pinOn = ctx->processor->isStayOpen();
+            HWND owner = ::GetWindow(hwnd, GW_OWNER);
+            const bool ownerMinimized = (owner != nullptr && ::IsIconic(owner) != FALSE);
+            if (pinOn && !(*ctx->allowHostHide) && !ownerMinimized)
+                return 0;
         }
-        lastHostVisible = hostVisibleNow;
     }
-    else if (floatingWindow != nullptr && floatingWindow->isVisible())
-    {
-        const auto sb = floatingWindow->getScreenBounds();
-        if (!sb.isEmpty())
-            savedBounds = sb;
-    }
+
+    return ::DefSubclassProc(hwnd, msg, wParam, lParam);
 }
-
-void FloatingWindowManager::showFloatingWindow()
-{
-    if (shuttingDown)
-        return;
-
-    ensureContentCreated();
-
-    if (hostEditor != nullptr && sharedContent->getParentComponent() == hostEditor.getComponent())
-        hostEditor->removeChildComponent(sharedContent.get());
-
-    if (floatingWindow == nullptr)
-        floatingWindow = std::make_unique<PinnedWindow>(processor, [this] { handleFloatingClosedByUser(); });
-
-    floatingWindow->setAlwaysOnTop(processor.isStayOpen());
-    if (floatingWindow->getContentComponent() != sharedContent.get())
-        floatingWindow->setContentNonOwned(sharedContent.get(), false);
-
-    if (!savedBounds.isEmpty())
-    {
-        const int w = juce::jlimit(520, 1920, savedBounds.getWidth());
-        const int h = juce::jlimit(380, 1200, savedBounds.getHeight());
-        floatingWindow->setBounds(savedBounds.getX(), savedBounds.getY(), w, h);
-    }
-    else
-    {
-        floatingWindow->centreWithSize(740, 600);
-    }
-
-    floatingWindow->setVisible(true);
-    startTimer(150);
-}
-
-void FloatingWindowManager::hideFloatingWindow(bool rememberBounds)
-{
-    if (floatingWindow == nullptr)
-        return;
-
-    if (rememberBounds && floatingWindow->isVisible())
-    {
-        const auto sb = floatingWindow->getScreenBounds();
-        if (!sb.isEmpty())
-            savedBounds = sb;
-    }
-
-    if (floatingWindow->getContentComponent() == sharedContent.get())
-        floatingWindow->clearContentComponent();
-
-    floatingWindow->setVisible(false);
-}
-
-void FloatingWindowManager::handleFloatingClosedByUser()
-{
-    userDismissedFloating = true;
-    hideFloatingWindow(true);
-    if (hostEditor == nullptr)
-        stopTimer();
-}
-
-//==============================================================================
-// LyricsDisplayAudioProcessorEditor
-//==============================================================================
+} // namespace
+#endif
 
 LyricsDisplayAudioProcessorEditor::LyricsDisplayAudioProcessorEditor(LyricsDisplayAudioProcessor& p)
-    : AudioProcessorEditor(&p), processor(p)
+    : AudioProcessorEditor(&p), processor(p), content(p)
 {
     setResizable(true, true);
     setResizeLimits(520, 380, 1920, 1200);
     setSize(740, 600);
 
-    processor.onHostEditorOpened(this);
+    addAndMakeVisible(content);
+    attachHostPinHook();
+    startTimer(100);
 }
 
 LyricsDisplayAudioProcessorEditor::~LyricsDisplayAudioProcessorEditor()
 {
-    processor.onHostEditorClosed(this, getScreenBounds());
+    stopTimer();
+    detachHostPinHook();
 }
 
 void LyricsDisplayAudioProcessorEditor::resized()
 {
-    if (auto* child = getChildComponent(0))
-        child->setBounds(getLocalBounds());
+    content.setBounds(getLocalBounds());
+}
+
+void LyricsDisplayAudioProcessorEditor::parentHierarchyChanged()
+{
+    attachHostPinHook();
+}
+
+void LyricsDisplayAudioProcessorEditor::timerCallback()
+{
+    if (subclassedHostHwnd != nullptr)
+    {
+        stopTimer();
+        return;
+    }
+
+    attachHostPinHook();
+    if (subclassedHostHwnd != nullptr)
+        stopTimer();
+}
+
+void LyricsDisplayAudioProcessorEditor::attachHostPinHook()
+{
+    if (processor.wrapperType == juce::AudioProcessor::wrapperType_Standalone)
+    {
+        if (auto* top = getTopLevelComponent())
+            top->setAlwaysOnTop(processor.isStayOpen());
+        stopTimer();
+        return;
+    }
+
+#if JUCE_WINDOWS
+    if (subclassedHostHwnd != nullptr)
+        return;
+
+    auto* peer = getPeer();
+    if (peer == nullptr)
+        return;
+
+    auto* childHwnd = static_cast<HWND>(peer->getNativeHandle());
+    if (childHwnd == nullptr)
+        return;
+
+    HWND rootHwnd = ::GetAncestor(childHwnd, GA_ROOT);
+    if (rootHwnd == nullptr || rootHwnd == childHwnd)
+        return;
+
+    auto* ctx = new HostPinHookContext { &processor, &allowHostHide, &subclassedHostHwnd };
+    if (::SetWindowSubclass(rootHwnd, &hostWindowSubclassProc, kHostPinSubclassId, reinterpret_cast<DWORD_PTR>(ctx)))
+    {
+        subclassedHostHwnd = rootHwnd;
+    }
+    else
+    {
+        delete ctx;
+    }
+#endif
+}
+
+void LyricsDisplayAudioProcessorEditor::detachHostPinHook()
+{
+#if JUCE_WINDOWS
+    if (subclassedHostHwnd != nullptr)
+    {
+        auto* hwnd = static_cast<HWND>(subclassedHostHwnd);
+        DWORD_PTR refData = 0;
+        if (::GetWindowSubclass(hwnd, &hostWindowSubclassProc, kHostPinSubclassId, &refData))
+        {
+            ::RemoveWindowSubclass(hwnd, &hostWindowSubclassProc, kHostPinSubclassId);
+            delete reinterpret_cast<HostPinHookContext*>(refData);
+        }
+        subclassedHostHwnd = nullptr;
+    }
+#endif
 }

@@ -4,19 +4,12 @@
 LyricsDisplayAudioProcessor::LyricsDisplayAudioProcessor()
     : AudioProcessor(BusesProperties()
                          .withInput("Input", juce::AudioChannelSet::stereo(), true)
-                         .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
-      floatingManager(std::make_unique<FloatingWindowManager>(*this))
+                         .withOutput("Output", juce::AudioChannelSet::stereo(), true))
 {
     auto settings = lyrics_service::loadAppSettings();
     darkTheme.store(settings.darkTheme);
     fontSize.store(settings.fontSize);
     stayOpen.store(settings.stayOpen);
-}
-
-LyricsDisplayAudioProcessor::~LyricsDisplayAudioProcessor()
-{
-    if (floatingManager)
-        floatingManager->shutdown();
 }
 
 void LyricsDisplayAudioProcessor::prepareToPlay(double, int) {}
@@ -150,21 +143,6 @@ void LyricsDisplayAudioProcessor::setStayOpen(bool enabled)
     stayOpen.store(enabled);
     lyrics_service::saveAppSettings({ darkTheme.load(), fontSize.load(), enabled });
     stateVersion.fetch_add(1, std::memory_order_release);
-    if (floatingManager)
-        floatingManager->onStayOpenChanged(enabled);
-}
-
-void LyricsDisplayAudioProcessor::onHostEditorOpened(juce::AudioProcessorEditor* editor)
-{
-    if (floatingManager)
-        floatingManager->onHostEditorOpened(editor);
-}
-
-void LyricsDisplayAudioProcessor::onHostEditorClosed(juce::AudioProcessorEditor* editor,
-                                                     juce::Rectangle<int> lastScreenBounds)
-{
-    if (floatingManager)
-        floatingManager->onHostEditorClosed(editor, lastScreenBounds);
 }
 
 void LyricsDisplayAudioProcessor::getStateInformation(juce::MemoryBlock& destData)

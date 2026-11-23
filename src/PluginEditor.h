@@ -54,9 +54,12 @@ private:
         LyricsDisplayContent& owner;
     };
 
+    enum class ActiveTab { Lyrics, Info };
+
     void timerCallback() override;
 
     void applyTheme();
+    void setActiveTab(ActiveTab tab);
     void syncFromProcessorState();
     void updateMetadataUi();
     void updateOffsetButtonText();
@@ -72,21 +75,47 @@ private:
     void importLyricsFile();
     void exportLyricsFile();
 
+    // Info / GitHub Release Updater actions
+    void checkForGithubUpdate(bool pullAfterCheck = false);
+    void pullLatestGithubRelease();
+    void setUpdateStatus(const juce::String& text, bool isError = false, double progress = -1.0);
+    void updateInfoButtonsState();
+
     double getEffectivePlaybackTimeSec() const noexcept;
 
     LyricsDisplayAudioProcessor& processor;
     StudioLookAndFeel lookAndFeel;
     theme::Palette palette = theme::darkPalette();
+    ActiveTab activeTab = ActiveTab::Lyrics;
 
     juce::ThreadPool workerPool { 2 };
     std::unique_ptr<juce::FileChooser> activeFileChooser;
 
     // Header controls
     juce::Label brandLabel;
+    juce::TextButton tabLyricsBtn { "Lyrics" };
+    juce::TextButton tabInfoBtn { "Info" };
     juce::TextButton stayOpenBtn { "" };
     juce::TextButton fontMinusBtn { "A-" };
     juce::TextButton fontPlusBtn { "A+" };
     juce::TextButton themeToggleBtn { "Light" };
+
+    // Info tab controls
+    juce::TextButton openGithubBtn { "Open GitHub" };
+    juce::TextButton openReleasesBtn { "Releases Page" };
+    juce::TextButton checkUpdateBtn { "Check Updates" };
+    juce::TextButton pullReleaseBtn { "Pull Latest Release" };
+    juce::TextButton openDownloadDirBtn { "Open Folder" };
+    juce::TextEditor releaseNotesBox;
+
+    GithubReleaseInfo latestRelease;
+    bool hasCheckedRelease = false;
+    bool isUpdatingRelease = false;
+    double updateProgress01 = -1.0;
+    juce::String updateStatusText { "Click \"Check Updates\" or \"Pull Latest Release\" to check GitHub." };
+    bool updateStatusIsError = false;
+    juce::File lastDownloadedReleaseDir;
+    juce::uint64 updateToken = 0;
 
     // Search & action bar
     juce::TextEditor searchInput;
@@ -135,55 +164,33 @@ private:
     juce::Rectangle<int> metaStripArea;
     juce::Rectangle<int> candidatesHeaderRect;
     juce::Rectangle<int> previewBarArea;
+    juce::Rectangle<int> infoAboutCardRect;
+    juce::Rectangle<int> infoUpdateCardRect;
+    juce::Rectangle<int> infoProgressRect;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LyricsDisplayContent)
 };
 
-class FloatingWindowManager : private juce::Timer
-{
-public:
-    explicit FloatingWindowManager(LyricsDisplayAudioProcessor& p);
-    ~FloatingWindowManager() override;
-
-    void onHostEditorOpened(juce::AudioProcessorEditor* editor);
-    void onHostEditorClosed(juce::AudioProcessorEditor* editor, juce::Rectangle<int> lastScreenBounds);
-    void onStayOpenChanged(bool enabled);
-    void shutdown();
-
-private:
-    class PinnedWindow;
-
-    void timerCallback() override;
-    void ensureContentCreated();
-    void attachContentToHost();
-    void showFloatingWindow();
-    void hideFloatingWindow(bool rememberBounds);
-    void handleFloatingClosedByUser();
-
-    LyricsDisplayAudioProcessor& processor;
-    juce::Component::SafePointer<juce::AudioProcessorEditor> hostEditor;
-    std::unique_ptr<LyricsDisplayContent> sharedContent;
-    std::unique_ptr<PinnedWindow> floatingWindow;
-    juce::Rectangle<int> savedBounds;
-
-    bool userDismissedFloating = false;
-    bool shuttingDown = false;
-    bool lastHostVisible = false;
-    std::shared_ptr<bool> aliveToken = std::make_shared<bool>(true);
-
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(FloatingWindowManager)
-};
-
-class LyricsDisplayAudioProcessorEditor : public juce::AudioProcessorEditor
+class LyricsDisplayAudioProcessorEditor : public juce::AudioProcessorEditor,
+                                          private juce::Timer
 {
 public:
     explicit LyricsDisplayAudioProcessorEditor(LyricsDisplayAudioProcessor&);
     ~LyricsDisplayAudioProcessorEditor() override;
 
     void resized() override;
+    void parentHierarchyChanged() override;
 
 private:
+    void timerCallback() override;
+    void attachHostPinHook();
+    void detachHostPinHook();
+
     LyricsDisplayAudioProcessor& processor;
+    LyricsDisplayContent content;
+
+    void* subclassedHostHwnd = nullptr;
+    bool allowHostHide = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LyricsDisplayAudioProcessorEditor)
 };

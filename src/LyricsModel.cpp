@@ -212,4 +212,47 @@ int findActiveLineIndex(const std::vector<LyricLine>& lines, double effectiveTim
     return static_cast<int>(std::distance(lines.begin(), it)) - 1;
 }
 
+int compareSemver(const juce::String& a, const juce::String& b)
+{
+    auto parseParts = [](const juce::String& raw) {
+        juce::String s = raw.trim();
+        if (s.startsWithIgnoreCase("v"))
+            s = s.substring(1);
+        const int dashIdx = s.indexOfChar('-');
+        if (dashIdx >= 0)
+            s = s.substring(0, dashIdx);
+        const int plusIdx = s.indexOfChar('+');
+        if (plusIdx >= 0)
+            s = s.substring(0, plusIdx);
+
+        std::vector<int> nums;
+        juce::StringArray tokens;
+        tokens.addTokens(s, ".", "");
+        for (const auto& tok : tokens)
+            nums.push_back(tok.getIntValue());
+        while (nums.size() < 3)
+            nums.push_back(0);
+        return nums;
+    };
+
+    const auto pa = parseParts(a);
+    const auto pb = parseParts(b);
+    const size_t n = std::max(pa.size(), pb.size());
+    for (size_t i = 0; i < n; ++i)
+    {
+        const int va = i < pa.size() ? pa[i] : 0;
+        const int vb = i < pb.size() ? pb[i] : 0;
+        if (va < vb)
+            return -1;
+        if (va > vb)
+            return 1;
+    }
+    return 0;
+}
+
+bool isNewerVersion(const juce::String& candidate, const juce::String& current)
+{
+    return compareSemver(candidate, current) > 0;
+}
+
 } // namespace lyrics

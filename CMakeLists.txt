@@ -56,6 +56,7 @@ target_link_libraries(LyricsDisplay
     PRIVATE
         juce::juce_audio_utils
         juce::juce_gui_extra
+        $<$<BOOL:${WIN32}>:comctl32>
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
