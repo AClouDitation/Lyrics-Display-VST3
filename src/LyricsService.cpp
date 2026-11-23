@@ -4,6 +4,17 @@
 #include <cmath>
 #include <tuple>
 
+#if JUCE_WINDOWS
+ #ifndef WIN32_LEAN_AND_MEAN
+  #define WIN32_LEAN_AND_MEAN
+ #endif
+ #ifndef NOMINMAX
+  #define NOMINMAX
+ #endif
+ #include <windows.h>
+ #include <shellapi.h>
+#endif
+
 namespace lyrics_service
 {
 
@@ -243,33 +254,198 @@ GithubReleaseInfo fetchLatestGithubRelease()
     return info;
 }
 
-ReleaseDownloadResult downloadLatestGithubRelease(
+juce::File getCurrentModuleFile()
+{
+#if JUCE_WINDOWS
+    HMODULE hMod = nullptr;
+    if (::GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&getCurrentModuleFile),
+            &hMod) != FALSE && hMod != nullptr)
+    {
+        std::wstring buf(32768, L'\0');
+        const DWORD len = ::GetModuleFileNameW(hMod, buf.data(), static_cast<DWORD>(buf.size()));
+        if (len > 0 && len < buf.size())
+            return juce::File(juce::String(buf.c_str(), static_cast<size_t>(len)));
+    }
+#endif
+    return juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+}
+
+void cleanupOldUpdateBackups()
+{
+    const auto modFile = getCurrentModuleFile();
+    if (!modFile.existsAsFile())
+        return;
+
+    const auto backupFile = juce::File(modFile.getFullPathName() + ".old");
+    if (backupFile.existsAsFile())
+        backupFile.deleteFile();
+}
+
+namespace
+{
+#if JUCE_WINDOWS
+    juce::String escapePsSingleQuoted(const juce::String& s)
+    {
+        return s.replace("'", "''");
+    }
+
+    bool findExtractedPayload(const juce::File& extractRoot, bool wantVst3,
+                              juce::File& outBinary, juce::File& outModuleInfo)
+    {
+        auto allFiles = extractRoot.findChildFiles(juce::File::findFiles, true);
+        for (const auto& f : allFiles)
+        {
+            const auto name = f.getFileName();
+            if (wantVst3)
+            {
+                if (name.equalsIgnoreCase("Lyrics Display.vst3")
+                    && f.getParentDirectory().getFileName().equalsIgnoreCase("x86_64-win"))
+                {
+                    outBinary = f;
+                }
+                else if (name.equalsIgnoreCase("moduleinfo.json"))
+                {
+                    outModuleInfo = f;
+                }
+            }
+            else
+            {
+                if (name.equalsIgnoreCase("Lyrics Display.exe"))
+                    outBinary = f;
+            }
+        }
+        return outBinary.existsAsFile();
+    }
+
+    bool applyElevatedReplace(const juce::File& stagingDir,
+                              const juce::File& targetBinary,
+                              const juce::File& newBinary,
+                              const juce::File& targetModuleInfo,
+                              const juce::File& newModuleInfo,
+                              juce::String& outError)
+    {
+        const auto scriptFile = stagingDir.getChildFile("apply_update.ps1");
+        const auto backupPath = targetBinary.getFullPathName() + ".old";
+
+        juce::String ps;
+        ps << "$ErrorActionPreference = 'Stop'\n";
+        ps << "$target = '" << escapePsSingleQuoted(targetBinary.getFullPathName()) << "'\n";
+        ps << "$backup = '" << escapePsSingleQuoted(backupPath) << "'\n";
+        ps << "$newBin = '" << escapePsSingleQuoted(newBinary.getFullPathName()) << "'\n";
+        ps << "if (Test-Path $backup) { Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue }\n";
+        ps << "Move-Item -LiteralPath $target -Destination $backup -Force\n";
+        ps << "try {\n";
+        ps << "    Copy-Item -LiteralPath $newBin -Destination $target -Force\n";
+        ps << "} catch {\n";
+        ps << "    Move-Item -LiteralPath $backup -Destination $target -Force -ErrorAction SilentlyContinue\n";
+        ps << "    throw\n";
+        ps << "}\n";
+        if (targetModuleInfo != juce::File() && newModuleInfo.existsAsFile())
+        {
+            ps << "$targetInfo = '" << escapePsSingleQuoted(targetModuleInfo.getFullPathName()) << "'\n";
+            ps << "$newInfo = '" << escapePsSingleQuoted(newModuleInfo.getFullPathName()) << "'\n";
+            ps << "New-Item -ItemType Directory -Path (Split-Path -Parent $targetInfo) -Force | Out-Null\n";
+            ps << "Copy-Item -LiteralPath $newInfo -Destination $targetInfo -Force\n";
+        }
+        ps << "Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue\n";
+
+        if (!scriptFile.replaceWithText(ps, false, false, "\n"))
+        {
+            outError = "Could not create elevated update helper script.";
+            return false;
+        }
+
+        const juce::String params = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \""
+                                    + scriptFile.getFullPathName() + "\"";
+        const std::wstring wParams = params.toWideCharPointer();
+
+        SHELLEXECUTEINFOW sei {};
+        sei.cbSize = sizeof(sei);
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+        sei.lpVerb = L"runas";
+        sei.lpFile = L"powershell.exe";
+        sei.lpParameters = wParams.c_str();
+        sei.nShow = SW_HIDE;
+
+        if (::ShellExecuteExW(&sei) == FALSE)
+        {
+            const DWORD err = ::GetLastError();
+            outError = (err == ERROR_CANCELLED)
+                ? "Administrator permission prompt was cancelled."
+                : ("Could not start elevated installer (Win32 error " + juce::String(static_cast<int>(err)) + ").");
+            return false;
+        }
+
+        DWORD exitCode = 1;
+        if (sei.hProcess != nullptr)
+        {
+            ::WaitForSingleObject(sei.hProcess, 60000);
+            ::GetExitCodeProcess(sei.hProcess, &exitCode);
+            ::CloseHandle(sei.hProcess);
+        }
+
+        if (exitCode != 0)
+        {
+            outError = "Elevated update failed (exit code " + juce::String(static_cast<int>(exitCode)) + ").";
+            return false;
+        }
+        return true;
+    }
+#endif
+} // namespace
+
+ReleaseUpdateResult updatePluginInPlace(
     const GithubReleaseInfo& release,
     std::function<void(double, const juce::String&)> onProgress)
 {
-    ReleaseDownloadResult res;
+    ReleaseUpdateResult res;
     if (!release.ok || !release.downloadUrl.startsWithIgnoreCase("https://"))
     {
         res.errorMessage = "No downloadable HTTPS release asset available.";
         return res;
     }
 
-    auto baseDownloads = juce::File::getSpecialLocation(juce::File::userHomeDirectory).getChildFile("Downloads");
-    if (!baseDownloads.isDirectory())
-        baseDownloads = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
-
-    const juce::String folderName = "Lyrics-Display-"
-        + juce::File::createLegalFileName(release.tagName.isNotEmpty() ? release.tagName : "latest");
-    juce::File targetDir = baseDownloads.getChildFile(folderName);
-    if (!targetDir.createDirectory().wasOk())
+#if !JUCE_WINDOWS
+    res.errorMessage = "In-place self-update is currently supported on Windows only.";
+    return res;
+#else
+    const juce::File currentBin = getCurrentModuleFile();
+    if (!currentBin.existsAsFile())
     {
-        res.errorMessage = "Could not create download folder: " + targetDir.getFullPathName();
+        res.errorMessage = "Could not locate the currently installed plugin binary.";
         return res;
     }
 
+    const bool isVst3 = currentBin.getFileExtension().equalsIgnoreCase(".vst3");
+    const bool isStandaloneExe = currentBin.getFileExtension().equalsIgnoreCase(".exe");
+    res.isStandalone = isStandaloneExe;
+    res.installedBinary = currentBin;
+
+    if (!isVst3 && !isStandaloneExe)
+    {
+        res.errorMessage = "Unsupported module type for in-place update: " + currentBin.getFileName();
+        return res;
+    }
+
+    const juce::File stagingDir = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                      .getChildFile("LyricsDisplayUpdate_" + juce::String(juce::Time::currentTimeMillis()));
+    if (!stagingDir.createDirectory().wasOk())
+    {
+        res.errorMessage = "Could not create temporary staging directory.";
+        return res;
+    }
+
+    struct ScopedDirCleanup
+    {
+        juce::File dir;
+        ~ScopedDirCleanup() { dir.deleteRecursively(); }
+    } cleanup { stagingDir };
+
     const juce::String safeAssetName = juce::File::createLegalFileName(
         release.assetName.isNotEmpty() ? release.assetName : "release.zip");
-    juce::File targetFile = targetDir.getChildFile(safeAssetName);
+    const juce::File archiveFile = stagingDir.getChildFile(safeAssetName);
 
     if (onProgress)
         onProgress(0.05, "Downloading " + safeAssetName + "...");
@@ -293,12 +469,11 @@ ReleaseDownloadResult downloadLatestGithubRelease(
         return res;
     }
 
-    targetFile.deleteFile();
     {
-        juce::FileOutputStream out(targetFile);
+        juce::FileOutputStream out(archiveFile);
         if (!out.openedOk())
         {
-            res.errorMessage = "Could not open file for writing: " + targetFile.getFullPathName();
+            res.errorMessage = "Could not write temporary release archive.";
             return res;
         }
 
@@ -315,7 +490,7 @@ ReleaseDownloadResult downloadLatestGithubRelease(
                 break;
             if (!out.write(buf.getData(), static_cast<size_t>(bytesRead)))
             {
-                res.errorMessage = "Disk write error while saving release.";
+                res.errorMessage = "Disk write error while downloading update.";
                 return res;
             }
             totalWritten += bytesRead;
@@ -323,67 +498,129 @@ ReleaseDownloadResult downloadLatestGithubRelease(
             {
                 if (expectedBytes > 0)
                 {
-                    const double pct = juce::jlimit(0.05, 0.85, 0.05 + 0.80 * (static_cast<double>(totalWritten) / static_cast<double>(expectedBytes)));
+                    const double pct = juce::jlimit(0.05, 0.78, 0.05 + 0.73 * (static_cast<double>(totalWritten) / static_cast<double>(expectedBytes)));
                     onProgress(pct, juce::String::formatted("Downloading %.1f / %.1f MB...",
                                                             static_cast<double>(totalWritten) / 1048576.0,
                                                             static_cast<double>(expectedBytes) / 1048576.0));
                 }
                 else
                 {
-                    onProgress(0.5, juce::String::formatted("Downloading %.1f MB...",
-                                                            static_cast<double>(totalWritten) / 1048576.0));
+                    onProgress(0.45, juce::String::formatted("Downloading %.1f MB...",
+                                                             static_cast<double>(totalWritten) / 1048576.0));
                 }
             }
         }
         out.flush();
     }
 
-    res.outputDir = targetDir;
-    res.downloadedFile = targetFile;
+    juce::File newBinary;
+    juce::File newModuleInfo;
 
-    // Safely extract .zip archives (guarding against zip-slip path traversal)
-    if (targetFile.getFileExtension().equalsIgnoreCase(".zip"))
+    if (archiveFile.getFileExtension().equalsIgnoreCase(".zip"))
     {
         if (onProgress)
-            onProgress(0.90, "Extracting release archive...");
+            onProgress(0.82, "Extracting release archive...");
 
-        juce::ZipFile zip(targetFile);
+        juce::ZipFile zip(archiveFile);
         const int numEntries = zip.getNumEntries();
-        if (numEntries > 0)
+        if (numEntries <= 0)
         {
-            juce::File extractRoot = targetDir.getChildFile("extracted");
-            extractRoot.createDirectory();
-            bool allSafe = true;
-            for (int i = 0; i < numEntries; ++i)
-            {
-                const auto* entry = zip.getEntry(i);
-                if (entry == nullptr)
-                    continue;
-                const auto entryPath = entry->filename.replaceCharacter('\\', '/');
-                if (entryPath.startsWith("/") || entryPath.contains(".."))
-                {
-                    allSafe = false;
-                    continue;
-                }
-                const auto dest = extractRoot.getChildFile(entryPath);
-                if (!dest.isAChildOf(extractRoot))
-                {
-                    allSafe = false;
-                    continue;
-                }
-                zip.uncompressEntry(i, extractRoot, true);
-            }
-            res.extracted = allSafe;
-            if (allSafe)
-                res.outputDir = extractRoot;
+            res.errorMessage = "Downloaded archive is empty or corrupted.";
+            return res;
         }
+
+        juce::File extractRoot = stagingDir.getChildFile("extracted");
+        extractRoot.createDirectory();
+        for (int i = 0; i < numEntries; ++i)
+        {
+            const auto* entry = zip.getEntry(i);
+            if (entry == nullptr)
+                continue;
+            const auto entryPath = entry->filename.replaceCharacter('\\', '/');
+            if (entryPath.startsWith("/") || entryPath.contains(".."))
+                continue;
+            const auto dest = extractRoot.getChildFile(entryPath);
+            if (!dest.isAChildOf(extractRoot))
+                continue;
+            zip.uncompressEntry(i, extractRoot, true);
+        }
+
+        if (!findExtractedPayload(extractRoot, isVst3, newBinary, newModuleInfo))
+        {
+            res.errorMessage = isVst3
+                ? "Release archive does not contain a Windows VST3 binary (Lyrics Display.vst3)."
+                : "Release archive does not contain Lyrics Display.exe.";
+            return res;
+        }
+    }
+    else
+    {
+        newBinary = archiveFile;
+    }
+
+    juce::File targetModuleInfo;
+    if (isVst3)
+    {
+        const auto contentsDir = currentBin.getParentDirectory().getParentDirectory();
+        if (contentsDir.getFileName().equalsIgnoreCase("Contents"))
+            targetModuleInfo = contentsDir.getChildFile("Resources").getChildFile("moduleinfo.json");
     }
 
     if (onProgress)
-        onProgress(1.0, "Release ready in " + res.outputDir.getFileName());
+        onProgress(0.92, "Replacing installed binary in place...");
 
-    res.ok = true;
+    // Attempt direct NTFS rename-while-loaded + copy-new (no UAC needed for user-writable folders)
+    const juce::File backupBin(currentBin.getFullPathName() + ".old");
+    backupBin.deleteFile();
+
+    const std::wstring wTarget = currentBin.getFullPathName().toWideCharPointer();
+    const std::wstring wBackup = backupBin.getFullPathName().toWideCharPointer();
+    const std::wstring wNew = newBinary.getFullPathName().toWideCharPointer();
+
+    if (::MoveFileExW(wTarget.c_str(), wBackup.c_str(), MOVEFILE_REPLACE_EXISTING) != FALSE)
+    {
+        if (::CopyFileW(wNew.c_str(), wTarget.c_str(), FALSE) != FALSE)
+        {
+            if (targetModuleInfo != juce::File() && newModuleInfo.existsAsFile())
+            {
+                targetModuleInfo.getParentDirectory().createDirectory();
+                newModuleInfo.copyFileTo(targetModuleInfo);
+            }
+            ::MoveFileExW(wBackup.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
+            if (onProgress)
+                onProgress(1.0, "Updated in place!");
+            res.ok = true;
+            return res;
+        }
+
+        // Roll back if copy failed
+        ::MoveFileExW(wBackup.c_str(), wTarget.c_str(), MOVEFILE_REPLACE_EXISTING);
+        res.errorMessage = "Failed to copy updated binary into place.";
+        return res;
+    }
+
+    const DWORD moveErr = ::GetLastError();
+    if (moveErr == ERROR_ACCESS_DENIED)
+    {
+        if (onProgress)
+            onProgress(0.94, "Requesting administrator permission to update Program Files...");
+
+        juce::String elevErr;
+        if (!applyElevatedReplace(stagingDir, currentBin, newBinary, targetModuleInfo, newModuleInfo, elevErr))
+        {
+            res.errorMessage = elevErr;
+            return res;
+        }
+        res.usedElevation = true;
+        if (onProgress)
+            onProgress(1.0, "Updated in place!");
+        res.ok = true;
+        return res;
+    }
+
+    res.errorMessage = "Could not replace binary in place (Win32 error " + juce::String(static_cast<int>(moveErr)) + ").";
     return res;
+#endif
 }
 
 bool loadLyricsFromFile(const juce::File& file, LyricsRecord& outRecord)

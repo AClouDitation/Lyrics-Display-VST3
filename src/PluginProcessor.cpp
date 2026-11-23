@@ -10,6 +10,7 @@ LyricsDisplayAudioProcessor::LyricsDisplayAudioProcessor()
     darkTheme.store(settings.darkTheme);
     fontSize.store(settings.fontSize);
     stayOpen.store(settings.stayOpen);
+    lyrics_service::cleanupOldUpdateBackups();
 }
 
 void LyricsDisplayAudioProcessor::prepareToPlay(double, int) {}

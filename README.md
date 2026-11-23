@@ -9,7 +9,7 @@ A standalone C++ / JUCE 8 **VST3** audio plugin (plus Standalone app) for **Able
 - **Built-in Editor & Import/Export:** Import or export `.lrc`, `.txt`, and `.json` files, or edit raw LRC timestamps and plain lyrics inline (`Edit` button or double-click the lyrics view).
 - **Pin Across Tracks (Default On):** Pushpin toggle in the header keeps the single plugin window open when switching between tracks in Ableton Live (without spawning a duplicate window or re-rendering), while still letting you close the window normally with `×`.
 - **Timing Offset & Project Persistence:** Adjust lyric timing in `-0.5s` / `+0.5s` increments (click the offset readout to reset), scale font size (`A-` / `A+`), toggle Dark/Light themes, and automatically persist lyrics and timing offset inside your DAW project file (`.als`).
-- **Info & GitHub Updates Tab:** Dedicated **Info** tab with a direct link to the GitHub repository, release notes viewer, **Check Updates**, and one-click **Pull Latest Release** (downloads and safely extracts the latest GitHub release into your `Downloads` folder).
+- **Info & In-Place GitHub Updater Tab:** Dedicated **Info** tab with a direct link to the GitHub repository, release notes viewer, **Check Updates**, and one-click **Update Now** (downloads the latest GitHub release and replaces the installed VST3/Standalone binary in place on Windows; restart Ableton Live afterward to load the updated DLL).
 - **Full Unicode & CJK Rendering:** Uses Windows DirectWrite typography for clean Chinese, Japanese, Korean, and Latin display.
 
 ## Requirements

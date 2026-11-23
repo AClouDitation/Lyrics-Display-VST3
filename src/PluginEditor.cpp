@@ -440,23 +440,26 @@ LyricsDisplayContent::LyricsDisplayContent(LyricsDisplayAudioProcessor& p)
     checkUpdateBtn.onClick = [this] { checkForGithubUpdate(false); };
     addChildComponent(checkUpdateBtn);
 
-    pullReleaseBtn.getProperties().set("primary", true);
-    pullReleaseBtn.setTooltip("Download the latest release from GitHub into your Downloads folder");
-    pullReleaseBtn.onClick = [this] {
+    updateInPlaceBtn.getProperties().set("primary", true);
+    updateInPlaceBtn.setTooltip("Download the latest GitHub release and replace the installed plugin binary in place");
+    updateInPlaceBtn.onClick = [this] {
         if (hasCheckedRelease && latestRelease.ok && latestRelease.downloadUrl.isNotEmpty())
-            pullLatestGithubRelease();
+            installLatestGithubReleaseInPlace();
         else
             checkForGithubUpdate(true);
     };
-    addChildComponent(pullReleaseBtn);
+    addChildComponent(updateInPlaceBtn);
 
-    openDownloadDirBtn.setEnabled(false);
-    openDownloadDirBtn.setTooltip("Reveal the downloaded release folder in File Explorer");
-    openDownloadDirBtn.onClick = [this] {
-        if (lastDownloadedReleaseDir.isDirectory())
-            lastDownloadedReleaseDir.revealToUser();
+    relaunchBtn.setVisible(false);
+    relaunchBtn.setTooltip("Relaunch the updated standalone app");
+    relaunchBtn.onClick = [this] {
+        if (updatedStandaloneExe.existsAsFile())
+        {
+            updatedStandaloneExe.startAsProcess();
+            juce::JUCEApplicationBase::quit();
+        }
     };
-    addChildComponent(openDownloadDirBtn);
+    addChildComponent(relaunchBtn);
 
     releaseNotesBox.setMultiLine(true, true);
     releaseNotesBox.setReadOnly(true);
@@ -464,7 +467,7 @@ LyricsDisplayContent::LyricsDisplayContent(LyricsDisplayAudioProcessor& p)
     releaseNotesBox.setCaretVisible(false);
     releaseNotesBox.setFont(theme::makeUiFont(13.0f, false));
     releaseNotesBox.setText("Repository: " + juce::String(lyrics_service::kGithubRepoUrl)
-                            + "\n\nClick \"Check Updates\" to fetch the latest GitHub release notes, or \"Pull Latest Release\" to download the latest build directly into your Downloads folder.",
+                            + "\n\nClick \"Check Updates\" to view release notes, or \"Update Now\" to update the installed plugin binary in place (restart Ableton Live afterward to load the new VST3 DLL).",
                             false);
     addChildComponent(releaseNotesBox);
 
@@ -549,8 +552,8 @@ void LyricsDisplayContent::setActiveTab(ActiveTab tab)
     openGithubBtn.setVisible(showInfoTab);
     openReleasesBtn.setVisible(showInfoTab);
     checkUpdateBtn.setVisible(showInfoTab);
-    pullReleaseBtn.setVisible(showInfoTab);
-    openDownloadDirBtn.setVisible(showInfoTab);
+    updateInPlaceBtn.setVisible(showInfoTab);
+    relaunchBtn.setVisible(showInfoTab && updateInstalledRestartNeeded && updatedStandaloneExe.existsAsFile());
     releaseNotesBox.setVisible(showInfoTab);
 
     resized();
@@ -568,11 +571,14 @@ void LyricsDisplayContent::setUpdateStatus(const juce::String& text, bool isErro
 void LyricsDisplayContent::updateInfoButtonsState()
 {
     checkUpdateBtn.setEnabled(!isUpdatingRelease);
-    pullReleaseBtn.setEnabled(!isUpdatingRelease);
-    openDownloadDirBtn.setEnabled(lastDownloadedReleaseDir.isDirectory());
+    updateInPlaceBtn.setEnabled(!isUpdatingRelease);
+    const bool showRelaunch = (activeTab == ActiveTab::Info)
+        && updateInstalledRestartNeeded
+        && updatedStandaloneExe.existsAsFile();
+    relaunchBtn.setVisible(showRelaunch);
 }
 
-void LyricsDisplayContent::checkForGithubUpdate(bool pullAfterCheck)
+void LyricsDisplayContent::checkForGithubUpdate(bool updateAfterCheck)
 {
     if (isUpdatingRelease)
         return;
@@ -583,10 +589,10 @@ void LyricsDisplayContent::checkForGithubUpdate(bool pullAfterCheck)
     setUpdateStatus("Checking GitHub for the latest release...", false, -1.0);
 
     juce::Component::SafePointer<LyricsDisplayContent> safeThis(this);
-    workerPool.addJob([safeThis, token, pullAfterCheck] {
+    workerPool.addJob([safeThis, token, updateAfterCheck] {
         auto info = lyrics_service::fetchLatestGithubRelease();
 
-        juce::MessageManager::callAsync([safeThis, token, info = std::move(info), pullAfterCheck]() mutable {
+        juce::MessageManager::callAsync([safeThis, token, info = std::move(info), updateAfterCheck]() mutable {
             if (safeThis == nullptr || token != safeThis->updateToken)
                 return;
 
@@ -626,9 +632,9 @@ void LyricsDisplayContent::checkForGithubUpdate(bool pullAfterCheck)
                 summary << "\n" << safeThis->latestRelease.body;
             safeThis->releaseNotesBox.setText(summary, false);
 
-            if (pullAfterCheck)
+            if (updateAfterCheck)
             {
-                safeThis->pullLatestGithubRelease();
+                safeThis->installLatestGithubReleaseInPlace();
                 return;
             }
 
@@ -643,20 +649,21 @@ void LyricsDisplayContent::checkForGithubUpdate(bool pullAfterCheck)
     });
 }
 
-void LyricsDisplayContent::pullLatestGithubRelease()
+void LyricsDisplayContent::installLatestGithubReleaseInPlace()
 {
     if (isUpdatingRelease || !latestRelease.ok)
         return;
 
     isUpdatingRelease = true;
+    updateInstalledRestartNeeded = false;
     const auto token = ++updateToken;
     const auto releaseCopy = latestRelease;
     updateInfoButtonsState();
-    setUpdateStatus("Starting download of " + releaseCopy.tagName + "...", false, 0.02);
+    setUpdateStatus("Updating in place to " + releaseCopy.tagName + "...", false, 0.02);
 
     juce::Component::SafePointer<LyricsDisplayContent> safeThis(this);
     workerPool.addJob([safeThis, token, releaseCopy] {
-        auto dlRes = lyrics_service::downloadLatestGithubRelease(
+        auto updRes = lyrics_service::updatePluginInPlace(
             releaseCopy,
             [safeThis, token](double pct, const juce::String& stage) {
                 juce::MessageManager::callAsync([safeThis, token, pct, stage] {
@@ -666,27 +673,36 @@ void LyricsDisplayContent::pullLatestGithubRelease()
                 });
             });
 
-        juce::MessageManager::callAsync([safeThis, token, dlRes = std::move(dlRes), releaseCopy]() mutable {
+        juce::MessageManager::callAsync([safeThis, token, updRes = std::move(updRes), releaseCopy]() mutable {
             if (safeThis == nullptr || token != safeThis->updateToken)
                 return;
 
             safeThis->isUpdatingRelease = false;
-            if (!dlRes.ok)
+            if (!updRes.ok)
             {
                 safeThis->updateInfoButtonsState();
-                safeThis->setUpdateStatus(dlRes.errorMessage, true, -1.0);
+                safeThis->setUpdateStatus(updRes.errorMessage, true, -1.0);
                 return;
             }
 
-            safeThis->lastDownloadedReleaseDir = dlRes.outputDir;
+            safeThis->updateInstalledRestartNeeded = true;
+            if (updRes.isStandalone)
+            {
+                safeThis->updatedStandaloneExe = updRes.installedBinary;
+                safeThis->setUpdateStatus(
+                    "Updated to " + releaseCopy.tagName + " in place! Click \"Relaunch App\" to load it now.",
+                    false, 1.0);
+            }
+            else
+            {
+                safeThis->updatedStandaloneExe = {};
+                safeThis->setUpdateStatus(
+                    "Updated to " + releaseCopy.tagName + " in place! Restart Ableton Live to load the new version.",
+                    false, 1.0);
+            }
             safeThis->updateInfoButtonsState();
-            safeThis->setUpdateStatus(
-                "Pulled " + releaseCopy.tagName + (dlRes.extracted ? " (extracted)" : "")
-                    + " — close Ableton Live, replace Lyrics Display.vst3, and reopen Live.",
-                false, 1.0);
-
-            if (dlRes.outputDir.isDirectory())
-                dlRes.outputDir.revealToUser();
+            safeThis->resized();
+            safeThis->repaint();
         });
     });
 }
@@ -1103,13 +1119,16 @@ void LyricsDisplayContent::resized()
         updInner.removeFromTop(8);
 
         auto btnRow = updInner.removeFromTop(32);
-        pullReleaseBtn.setBounds(btnRow.removeFromLeft(152));
+        updateInPlaceBtn.setBounds(btnRow.removeFromLeft(122));
         btnRow.removeFromLeft(8);
         checkUpdateBtn.setBounds(btnRow.removeFromLeft(116));
         btnRow.removeFromLeft(8);
         openReleasesBtn.setBounds(btnRow.removeFromLeft(112));
-        btnRow.removeFromLeft(8);
-        openDownloadDirBtn.setBounds(btnRow.removeFromLeft(102));
+        if (relaunchBtn.isVisible())
+        {
+            btnRow.removeFromLeft(8);
+            relaunchBtn.setBounds(btnRow.removeFromLeft(114));
+        }
 
         updInner.removeFromTop(10);
         infoProgressRect = updInner.removeFromTop(26);

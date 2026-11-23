@@ -76,8 +76,8 @@ private:
     void exportLyricsFile();
 
     // Info / GitHub Release Updater actions
-    void checkForGithubUpdate(bool pullAfterCheck = false);
-    void pullLatestGithubRelease();
+    void checkForGithubUpdate(bool updateAfterCheck = false);
+    void installLatestGithubReleaseInPlace();
     void setUpdateStatus(const juce::String& text, bool isError = false, double progress = -1.0);
     void updateInfoButtonsState();
 
@@ -104,17 +104,18 @@ private:
     juce::TextButton openGithubBtn { "Open GitHub" };
     juce::TextButton openReleasesBtn { "Releases Page" };
     juce::TextButton checkUpdateBtn { "Check Updates" };
-    juce::TextButton pullReleaseBtn { "Pull Latest Release" };
-    juce::TextButton openDownloadDirBtn { "Open Folder" };
+    juce::TextButton updateInPlaceBtn { "Update Now" };
+    juce::TextButton relaunchBtn { "Relaunch App" };
     juce::TextEditor releaseNotesBox;
 
     GithubReleaseInfo latestRelease;
     bool hasCheckedRelease = false;
     bool isUpdatingRelease = false;
+    bool updateInstalledRestartNeeded = false;
     double updateProgress01 = -1.0;
-    juce::String updateStatusText { "Click \"Check Updates\" or \"Pull Latest Release\" to check GitHub." };
+    juce::String updateStatusText { "Click \"Check Updates\" or \"Update Now\" to update in place from GitHub." };
     bool updateStatusIsError = false;
-    juce::File lastDownloadedReleaseDir;
+    juce::File updatedStandaloneExe;
     juce::uint64 updateToken = 0;
 
     // Search & action bar
