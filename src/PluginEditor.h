@@ -34,7 +34,7 @@ class LyricsDisplayContent : public juce::Component,
                              private juce::Timer
 {
 public:
-    LyricsDisplayContent(LyricsDisplayAudioProcessor& p, bool isFloatingWindow);
+    explicit LyricsDisplayContent(LyricsDisplayAudioProcessor& p);
     ~LyricsDisplayContent() override;
 
     void paint(juce::Graphics&) override;
@@ -75,7 +75,6 @@ private:
     double getEffectivePlaybackTimeSec() const noexcept;
 
     LyricsDisplayAudioProcessor& processor;
-    const bool isFloating;
     StudioLookAndFeel lookAndFeel;
     theme::Palette palette = theme::darkPalette();
 
@@ -84,7 +83,7 @@ private:
 
     // Header controls
     juce::Label brandLabel;
-    juce::TextButton stayOpenBtn { "Stay Open" };
+    juce::TextButton stayOpenBtn { "" };
     juce::TextButton fontMinusBtn { "A-" };
     juce::TextButton fontPlusBtn { "A+" };
     juce::TextButton themeToggleBtn { "Light" };
@@ -124,6 +123,7 @@ private:
     // Status & state sync
     juce::String statusMessage;
     bool statusIsError = false;
+    juce::uint64 lastSyncedLyricsVersion = 0;
     juce::uint64 lastSyncedStateVersion = 0;
     juce::uint64 searchToken = 0;
     juce::String lastKnownHostTrackName;
@@ -154,12 +154,15 @@ private:
     class PinnedWindow;
 
     void timerCallback() override;
+    void ensureContentCreated();
+    void attachContentToHost();
     void showFloatingWindow();
     void hideFloatingWindow(bool rememberBounds);
     void handleFloatingClosedByUser();
 
     LyricsDisplayAudioProcessor& processor;
     juce::Component::SafePointer<juce::AudioProcessorEditor> hostEditor;
+    std::unique_ptr<LyricsDisplayContent> sharedContent;
     std::unique_ptr<PinnedWindow> floatingWindow;
     juce::Rectangle<int> savedBounds;
 
@@ -181,7 +184,6 @@ public:
 
 private:
     LyricsDisplayAudioProcessor& processor;
-    LyricsDisplayContent content;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LyricsDisplayAudioProcessorEditor)
 };

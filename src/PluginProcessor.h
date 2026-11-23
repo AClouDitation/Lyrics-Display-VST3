@@ -76,7 +76,8 @@ public:
     void onHostEditorOpened(juce::AudioProcessorEditor* editor);
     void onHostEditorClosed(juce::AudioProcessorEditor* editor, juce::Rectangle<int> lastScreenBounds);
 
-    // Monotonic counter bumped whenever state changes (so editor can sync cleanly)
+    // Monotonic counters bumped when lyrics or UI settings change
+    juce::uint64 getLyricsVersion() const noexcept { return lyricsVersion.load(); }
     juce::uint64 getStateVersion() const noexcept { return stateVersion.load(); }
 
 private:
@@ -94,6 +95,7 @@ private:
     std::atomic<bool> darkTheme { true };
     std::atomic<float> fontSize { 21.0f };
     std::atomic<bool> stayOpen { true };
+    std::atomic<juce::uint64> lyricsVersion { 1 };
     std::atomic<juce::uint64> stateVersion { 1 };
 
     std::unique_ptr<FloatingWindowManager> floatingManager;

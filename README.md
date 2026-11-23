@@ -7,7 +7,7 @@ A standalone C++ / JUCE 8 **VST3** audio plugin (plus Standalone app) for **Able
 - **DAW Transport Sync:** Zero-latency stereo pass-through audio effect that reads host transport position (`timeInSeconds`, `isPlaying`, `bpm`) and smoothly highlights and auto-scrolls the active lyric line at 60 FPS.
 - **Direct LRCLIB Search:** Queries [LRCLIB](https://lrclib.net) asynchronously over HTTPS (UTF-8 Latin & CJK supported) with synced-first ranking.
 - **Built-in Editor & Import/Export:** Import or export `.lrc`, `.txt`, and `.json` files, or edit raw LRC timestamps and plain lyrics inline (`Edit` button or double-click the lyrics view).
-- **Stay Open Across Tracks (Default On):** Includes a **Stay Open** toggle in the header that keeps the lyrics display pinned on top in a floating window whenever Ableton hides or closes the plugin frame as you focus other tracks — and hands back seamlessly when you return to the plugin's track.
+- **Pin Across Tracks (Default On):** Includes a pushpin toggle button in the header that keeps the lyrics display pinned on top in a floating window whenever Ableton hides or closes the plugin frame as you focus other tracks — and hands back seamlessly when you return to the plugin's track.
 - **Timing Offset & Project Persistence:** Adjust lyric timing in `-0.5s` / `+0.5s` increments (click the offset readout to reset), scale font size (`A-` / `A+`), toggle Dark/Light themes, and automatically persist lyrics and timing offset inside your DAW project file (`.als`).
 - **Full Unicode & CJK Rendering:** Uses Windows DirectWrite typography for clean Chinese, Japanese, Korean, and Latin display.
 

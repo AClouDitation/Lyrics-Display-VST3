@@ -88,10 +88,59 @@ void StudioLookAndFeel::drawButtonBackground(juce::Graphics& g, juce::Button& bu
 }
 
 void StudioLookAndFeel::drawButtonText(juce::Graphics& g, juce::TextButton& button,
-                                       bool, bool)
+                                       bool isHighlighted, bool)
 {
     const bool isPrimary = button.getProperties().getWithDefault("primary", false);
+    const bool isPinIcon = button.getProperties().getWithDefault("pinIcon", false);
     const bool isActive = button.getToggleState();
+
+    if (isPinIcon)
+    {
+        juce::Colour pinCol = isActive ? palette.accent : (isHighlighted ? palette.text : palette.textMuted);
+        if (!button.isEnabled())
+            pinCol = pinCol.withAlpha(0.45f);
+
+        const auto bounds = button.getLocalBounds().toFloat();
+        const float iconSize = std::min(bounds.getWidth(), bounds.getHeight()) * 0.62f;
+        const float scale = iconSize / 24.0f;
+
+        juce::Path head;
+        head.startNewSubPath(8.5f, 4.0f);
+        head.lineTo(15.5f, 4.0f);
+        head.lineTo(14.5f, 6.0f);
+        head.lineTo(15.2f, 11.2f);
+        head.lineTo(18.0f, 13.8f);
+        head.lineTo(6.0f, 13.8f);
+        head.lineTo(8.8f, 11.2f);
+        head.lineTo(9.5f, 6.0f);
+        head.closeSubPath();
+
+        juce::Path needle;
+        needle.startNewSubPath(12.0f, 13.8f);
+        needle.lineTo(12.0f, 20.8f);
+
+        auto transform = juce::AffineTransform::translation(-12.0f, -12.0f);
+        if (!isActive)
+            transform = transform.rotated(juce::MathConstants<float>::pi * 0.25f);
+        transform = transform.scaled(scale).translated(bounds.getCentreX(), bounds.getCentreY());
+
+        head.applyTransform(transform);
+        needle.applyTransform(transform);
+
+        g.setColour(pinCol);
+        if (isActive)
+        {
+            g.fillPath(head);
+            g.strokePath(head, juce::PathStrokeType(1.1f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
+        }
+        else
+        {
+            g.strokePath(head, juce::PathStrokeType(1.5f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
+        }
+        g.strokePath(needle, juce::PathStrokeType(1.75f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
+        return;
+    }
+
     juce::Colour textCol = isPrimary ? juce::Colours::white
                                      : (isActive ? palette.accent : palette.text);
     if (!button.isEnabled())
@@ -202,21 +251,28 @@ void LyricsDisplayContent::CandidatesListModel::listBoxItemClicked(int row, cons
 // LyricsDisplayContent
 //==============================================================================
 
-LyricsDisplayContent::LyricsDisplayContent(LyricsDisplayAudioProcessor& p, bool isFloatingWindow)
-    : processor(p), isFloating(isFloatingWindow)
+LyricsDisplayContent::LyricsDisplayContent(LyricsDisplayAudioProcessor& p)
+    : processor(p)
 {
     setLookAndFeel(&lookAndFeel);
 
     // Header
-    brandLabel.setText(isFloating ? "LYRICS DISPLAY (PINNED)" : "LYRICS DISPLAY", juce::dontSendNotification);
+    brandLabel.setText("LYRICS DISPLAY", juce::dontSendNotification);
     brandLabel.setFont(theme::makeUiFont(14.0f, true));
     addAndMakeVisible(brandLabel);
 
+    stayOpenBtn.getProperties().set("pinIcon", true);
     stayOpenBtn.setClickingTogglesState(true);
+    auto updatePinTooltip = [this](bool isPinned) {
+        stayOpenBtn.setTooltip(isPinned
+            ? "Pinned: stays open across all tracks (click to unpin)"
+            : "Unpinned: click to keep lyrics visible across all tracks");
+    };
     stayOpenBtn.setToggleState(processor.isStayOpen(), juce::dontSendNotification);
-    stayOpenBtn.setTooltip("Keep lyrics window visible across all tracks (always on top when switching tracks)");
-    stayOpenBtn.onClick = [this] {
+    updatePinTooltip(processor.isStayOpen());
+    stayOpenBtn.onClick = [this, updatePinTooltip] {
         const bool next = stayOpenBtn.getToggleState();
+        updatePinTooltip(next);
         processor.setStayOpen(next);
         if (processor.wrapperType == juce::AudioProcessor::wrapperType_Standalone)
         {
@@ -414,15 +470,33 @@ void LyricsDisplayContent::syncFromProcessorState()
     if (processor.isDarkTheme() != lastAppliedDarkTheme)
         applyTheme();
 
-    stayOpenBtn.setToggleState(processor.isStayOpen(), juce::dontSendNotification);
+    const bool pinned = processor.isStayOpen();
+    stayOpenBtn.setToggleState(pinned, juce::dontSendNotification);
+    stayOpenBtn.setTooltip(pinned
+        ? "Pinned: stays open across all tracks (click to unpin)"
+        : "Unpinned: click to keep lyrics visible across all tracks");
     if (std::abs(lyricsViewport.getFontSize() - processor.getFontSize()) > 0.1f)
         lyricsViewport.setFontSize(processor.getFontSize());
 
     const auto rec = processor.getLyricsRecord();
-    const auto lines = processor.getParsedLines();
+    const auto currentLyricsVer = processor.getLyricsVersion();
+    if (currentLyricsVer != lastSyncedLyricsVersion)
+    {
+        lastSyncedLyricsVersion = currentLyricsVer;
+        const auto lines = processor.getParsedLines();
 
-    if (!isEditing)
-        lyricsViewport.setLyrics(rec, lines);
+        if (!isEditing)
+            lyricsViewport.setLyrics(rec, lines);
+
+        double maxDur = 240.0;
+        if (rec.hasDuration && rec.duration > 10.0)
+            maxDur = rec.duration;
+        else if (!lines.empty())
+            maxDur = std::max(60.0, lines.back().timeSec + 15.0);
+        previewSlider.setRange(0.0, maxDur, 0.05);
+
+        lyricsViewport.updatePlaybackTime(getEffectivePlaybackTimeSec(), rec.offsetSec, true);
+    }
 
     const auto lastQ = processor.getLastSearchQuery();
     const auto hostName = processor.getHostTrackName();
@@ -443,16 +517,8 @@ void LyricsDisplayContent::syncFromProcessorState()
             searchInput.setText(lyrics::cleanTrackQuery(hostName), false);
     }
 
-    double maxDur = 240.0;
-    if (rec.hasDuration && rec.duration > 10.0)
-        maxDur = rec.duration;
-    else if (!lines.empty())
-        maxDur = std::max(60.0, lines.back().timeSec + 15.0);
-    previewSlider.setRange(0.0, maxDur, 0.05);
-
     updateMetadataUi();
     updateOffsetButtonText();
-    lyricsViewport.updatePlaybackTime(getEffectivePlaybackTimeSec(), rec.offsetSec, true);
 }
 
 void LyricsDisplayContent::updateMetadataUi()
@@ -770,7 +836,7 @@ void LyricsDisplayContent::resized()
     // Header bar
     headerArea = area.removeFromTop(34);
     auto hdr = headerArea;
-    brandLabel.setBounds(hdr.removeFromLeft(isFloating ? 198 : 134));
+    brandLabel.setBounds(hdr.removeFromLeft(134));
     hdr.removeFromLeft(6);
 
     themeToggleBtn.setBounds(hdr.removeFromRight(56).reduced(0, 3));
@@ -779,7 +845,7 @@ void LyricsDisplayContent::resized()
     hdr.removeFromRight(4);
     fontMinusBtn.setBounds(hdr.removeFromRight(34).reduced(0, 3));
     hdr.removeFromRight(6);
-    stayOpenBtn.setBounds(hdr.removeFromRight(80).reduced(0, 3));
+    stayOpenBtn.setBounds(hdr.removeFromRight(32).reduced(0, 3));
     hdr.removeFromRight(8);
 
     transportPillRect = hdr.reduced(0, 3);
@@ -976,7 +1042,7 @@ class FloatingWindowManager::PinnedWindow : public juce::DocumentWindow
 {
 public:
     PinnedWindow(LyricsDisplayAudioProcessor& p, std::function<void()> onClose)
-        : DocumentWindow("Lyrics Display (Pinned)",
+        : DocumentWindow("Lyrics Display",
                          p.isDarkTheme() ? theme::darkPalette().bg : theme::lightPalette().bg,
                          DocumentWindow::minimiseButton | DocumentWindow::closeButton),
           onCloseCallback(std::move(onClose))
@@ -984,8 +1050,7 @@ public:
         setUsingNativeTitleBar(true);
         setResizable(true, true);
         setResizeLimits(520, 380, 1920, 1200);
-        setAlwaysOnTop(true);
-        setContentOwned(new LyricsDisplayContent(p, true), false);
+        setAlwaysOnTop(p.isStayOpen());
     }
 
     void closeButtonPressed() override
@@ -1017,21 +1082,49 @@ void FloatingWindowManager::shutdown()
         *aliveToken = false;
 
     stopTimer();
+
+    if (hostEditor != nullptr && sharedContent != nullptr)
+        hostEditor->removeChildComponent(sharedContent.get());
     hostEditor = nullptr;
 
-    if (floatingWindow)
+    if (floatingWindow != nullptr)
+        floatingWindow->clearContentComponent();
+
+    if (juce::MessageManager::existsAndIsCurrentThread())
     {
-        if (juce::MessageManager::existsAndIsCurrentThread())
-        {
-            floatingWindow.reset();
-        }
-        else
-        {
-            // Release raw pointer onto message thread if destructor is ever called off-thread
-            auto* raw = floatingWindow.release();
-            juce::MessageManager::callAsync([raw] { delete raw; });
-        }
+        floatingWindow.reset();
+        sharedContent.reset();
     }
+    else
+    {
+        auto* rawWin = floatingWindow.release();
+        auto* rawContent = sharedContent.release();
+        juce::MessageManager::callAsync([rawWin, rawContent] {
+            delete rawWin;
+            delete rawContent;
+        });
+    }
+}
+
+void FloatingWindowManager::ensureContentCreated()
+{
+    if (sharedContent == nullptr)
+        sharedContent = std::make_unique<LyricsDisplayContent>(processor);
+}
+
+void FloatingWindowManager::attachContentToHost()
+{
+    if (hostEditor == nullptr)
+        return;
+
+    ensureContentCreated();
+    if (floatingWindow != nullptr && floatingWindow->getContentComponent() == sharedContent.get())
+        floatingWindow->clearContentComponent();
+
+    if (sharedContent->getParentComponent() != hostEditor.getComponent())
+        hostEditor->addAndMakeVisible(sharedContent.get());
+
+    sharedContent->setBounds(hostEditor->getLocalBounds());
 }
 
 void FloatingWindowManager::onHostEditorOpened(juce::AudioProcessorEditor* editor)
@@ -1045,6 +1138,7 @@ void FloatingWindowManager::onHostEditorOpened(juce::AudioProcessorEditor* edito
 
     if (processor.wrapperType == juce::AudioProcessor::wrapperType_Standalone)
     {
+        attachContentToHost();
         if (editor != nullptr)
         {
             if (auto* top = editor->getTopLevelComponent())
@@ -1054,6 +1148,7 @@ void FloatingWindowManager::onHostEditorOpened(juce::AudioProcessorEditor* edito
     }
 
     hideFloatingWindow(true);
+    attachContentToHost();
     startTimer(150);
 }
 
@@ -1061,7 +1156,11 @@ void FloatingWindowManager::onHostEditorClosed(juce::AudioProcessorEditor* edito
                                                juce::Rectangle<int> lastScreenBounds)
 {
     if (hostEditor == editor)
+    {
+        if (sharedContent != nullptr && sharedContent->getParentComponent() == editor)
+            editor->removeChildComponent(sharedContent.get());
         hostEditor = nullptr;
+    }
 
     if (!lastScreenBounds.isEmpty())
         savedBounds = lastScreenBounds;
@@ -1101,13 +1200,11 @@ void FloatingWindowManager::onStayOpenChanged(bool enabled)
         return;
     }
 
-    if (!enabled)
-    {
-        hideFloatingWindow(true);
-        if (hostEditor == nullptr)
-            stopTimer();
-    }
-    else
+    // Never hide an already-visible window on toggle — only update its pinned/topmost state
+    if (floatingWindow != nullptr && floatingWindow->isVisible())
+        floatingWindow->setAlwaysOnTop(enabled);
+
+    if (enabled)
     {
         userDismissedFloating = false;
         if (hostEditor != nullptr && !isNativeWindowVisible(hostEditor.getComponent()))
@@ -1132,17 +1229,19 @@ void FloatingWindowManager::timerCallback()
             if (!lastHostVisible)
                 userDismissedFloating = false;
 
-            if (floatingWindow != nullptr)
+            if (floatingWindow != nullptr && floatingWindow->isVisible())
                 hideFloatingWindow(true);
+
+            attachContentToHost();
         }
         else if (processor.isStayOpen() && !userDismissedFloating)
         {
-            if (floatingWindow == nullptr)
+            if (floatingWindow == nullptr || !floatingWindow->isVisible())
                 showFloatingWindow();
         }
         lastHostVisible = hostVisibleNow;
     }
-    else if (floatingWindow != nullptr)
+    else if (floatingWindow != nullptr && floatingWindow->isVisible())
     {
         const auto sb = floatingWindow->getScreenBounds();
         if (!sb.isEmpty())
@@ -1152,10 +1251,20 @@ void FloatingWindowManager::timerCallback()
 
 void FloatingWindowManager::showFloatingWindow()
 {
-    if (shuttingDown || floatingWindow != nullptr)
+    if (shuttingDown)
         return;
 
-    floatingWindow = std::make_unique<PinnedWindow>(processor, [this] { handleFloatingClosedByUser(); });
+    ensureContentCreated();
+
+    if (hostEditor != nullptr && sharedContent->getParentComponent() == hostEditor.getComponent())
+        hostEditor->removeChildComponent(sharedContent.get());
+
+    if (floatingWindow == nullptr)
+        floatingWindow = std::make_unique<PinnedWindow>(processor, [this] { handleFloatingClosedByUser(); });
+
+    floatingWindow->setAlwaysOnTop(processor.isStayOpen());
+    if (floatingWindow->getContentComponent() != sharedContent.get())
+        floatingWindow->setContentNonOwned(sharedContent.get(), false);
 
     if (!savedBounds.isEmpty())
     {
@@ -1177,14 +1286,17 @@ void FloatingWindowManager::hideFloatingWindow(bool rememberBounds)
     if (floatingWindow == nullptr)
         return;
 
-    if (rememberBounds)
+    if (rememberBounds && floatingWindow->isVisible())
     {
         const auto sb = floatingWindow->getScreenBounds();
         if (!sb.isEmpty())
             savedBounds = sb;
     }
 
-    floatingWindow.reset();
+    if (floatingWindow->getContentComponent() == sharedContent.get())
+        floatingWindow->clearContentComponent();
+
+    floatingWindow->setVisible(false);
 }
 
 void FloatingWindowManager::handleFloatingClosedByUser()
@@ -1200,13 +1312,12 @@ void FloatingWindowManager::handleFloatingClosedByUser()
 //==============================================================================
 
 LyricsDisplayAudioProcessorEditor::LyricsDisplayAudioProcessorEditor(LyricsDisplayAudioProcessor& p)
-    : AudioProcessorEditor(&p), processor(p), content(p, false)
+    : AudioProcessorEditor(&p), processor(p)
 {
     setResizable(true, true);
     setResizeLimits(520, 380, 1920, 1200);
     setSize(740, 600);
 
-    addAndMakeVisible(content);
     processor.onHostEditorOpened(this);
 }
 
@@ -1217,5 +1328,6 @@ LyricsDisplayAudioProcessorEditor::~LyricsDisplayAudioProcessorEditor()
 
 void LyricsDisplayAudioProcessorEditor::resized()
 {
-    content.setBounds(getLocalBounds());
+    if (auto* child = getChildComponent(0))
+        child->setBounds(getLocalBounds());
 }

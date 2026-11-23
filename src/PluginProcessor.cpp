@@ -99,6 +99,7 @@ void LyricsDisplayAudioProcessor::setLyricsRecord(const LyricsRecord& record)
         currentLyrics = record;
         parsedLines = std::move(parsed.lines);
     }
+    lyricsVersion.fetch_add(1, std::memory_order_release);
     stateVersion.fetch_add(1, std::memory_order_release);
 }
 
@@ -223,6 +224,7 @@ void LyricsDisplayAudioProcessor::setStateInformation(const void* data, int size
         if (stay.isBool())
             stayOpen.store(static_cast<bool>(stay));
 
+        lyricsVersion.fetch_add(1, std::memory_order_release);
         stateVersion.fetch_add(1, std::memory_order_release);
     }
 }
